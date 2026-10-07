@@ -149,7 +149,7 @@ type Call<I, O> = {
   bivarianceHack(credential: CredentialInput, input: I): Promise<O>;
 }['bivarianceHack'];
 
-/** The part of a `betterIam()` instance Better Files uses. Structural, so any compatible 0.2.x instance fits. */
+/** The part of a `betterIam()` instance Better Files uses. Structural, so any compatible 0.2.x or 0.3.x instance fits. */
 export interface BetterIamInstance {
   authenticate(input: CredentialInput): Promise<AuthenticatedPrincipal>;
   authorize(
@@ -243,14 +243,14 @@ export interface BetterIamInstance {
         { tenantId: string; query?: string; limit?: number },
         { id: string; email?: string; name: string; guest?: unknown }[]
       >;
-      /** Member invitations (better-iam 0.2.0): groups are applied when the invitation is accepted. */
+      /** Member invitations (better-iam 0.2 and later): groups are applied when the invitation is accepted. */
       invite?: Call<
         { tenantId: string; email: string; name?: string; groupIds?: string[] },
         { invitationId: string }
       >;
       revokeInvitation?: Call<{ tenantId: string; invitationId: string }, unknown>;
     };
-    /** Guests (after better-iam 0.2.0). */
+    /** Guests (better-iam 0.3 and later). */
     guests?: {
       invite: Call<
         {
@@ -342,7 +342,7 @@ export interface BetterIamIntegrationOptions {
   /**
    * How people from outside the organization are invited. `guests` (the default when the instance has the guests
    * API) makes them Better IAM guests: sponsored, time-limited, inside the guest boundary. `members` sends a regular
-   * member invitation into the tenant instead, for Better IAM releases without guests (0.2.0 on npm). Those people
+   * member invitation into the tenant instead, for Better IAM releases without guests (0.2.x). Those people
    * become full tenant identities, so only choose it when your own roles give tenant members nothing by default.
    * Without guests and without this option, inviting an outsider reports UNSUPPORTED.
    */
@@ -883,7 +883,7 @@ export function betterIamIntegration(
       const features = betterIamFeatures(iam);
       if (options.externalInvites === 'guests' && !features.guests)
         throw invalidConfig(
-          "externalInvites: 'guests' needs a Better IAM release with guests (after 0.2.0)",
+          "externalInvites: 'guests' needs a Better IAM release with guests (0.3 or later)",
         );
       if (options.externalInvites === 'members' && !features.memberInvitations)
         throw invalidConfig("externalInvites: 'members' needs Better IAM member invitations");
@@ -908,7 +908,7 @@ export function betterIamIntegration(
  * The permissions a Better Files system service account needs in each tenant, as a Better IAM policy document. Attach
  * it to a role bound to the service account whose API key `systemCredential` returns.
  *
- * Pass the Better IAM instance so the document only names actions that release knows: 0.2.0 (npm) refuses a role
+ * Pass the Better IAM instance so the document only names actions that release knows: 0.2.x refuses a role
  * naming the `iam:guests:*` actions it does not have. Without it, the guest actions are included.
  */
 export function systemPolicy(iam?: BetterIamInstance): PolicyDocument {

@@ -116,8 +116,8 @@ export const { GET, POST, PUT, OPTIONS } = createBetterFilesNext(dr).handlers();
 
 ### 3.1 Capabilities we build on
 
-> Several rows describe Better IAM's `main` branch. The npm release (0.2.0) has no guests (`guests.invite`,
-> `guests.configure`, guest boundaries, `principal.guest`); Better Files detects this and falls back as §17 describes.
+> Guests (`guests.invite`, `guests.configure`, guest boundaries, `principal.guest`) arrived in better-iam 0.3.0. On 0.2.x
+> Better Files detects their absence and falls back as §17 describes.
 
 | Data room need                      | Better IAM feature                                                                                                                                                   | Better Files usage                                                                                       |
 | ----------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------- |
@@ -908,19 +908,18 @@ The examples show how to call it from:
 
 ### Better IAM during development
 
-`better-iam` 0.2.0 is on npm, and the workspace develops and tests against it (a dev dependency, `^0.2.0`). It is a
-**peer dependency** of `@better-files/iam` (optional on the umbrella), `>=0.2.0 <0.3.0`, and
+`better-iam` 0.3.0 is on npm (since 2026-10-07), and the workspace develops and tests against it (a dev dependency,
+`^0.3.0`). It is a **peer dependency** of `@better-files/iam` (optional on the umbrella), `>=0.2.0 <0.4.0`, and
 `validate-packages` checks every peer range admits the installed release.
 
 - `node scripts/better-iam.mjs link ../better-iam` switches the workspace to a local checkout (built with
   `pnpm build`) to try unreleased Better IAM changes; `node scripts/better-iam.mjs npm` switches back.
-- CI's `better-iam-main` job does the same with Better IAM's `main` branch on every push.
+- CI's `better-iam-main` job does the same with Better IAM's `main` branch on every push, and `better-iam-0.2`
+  runs the suite on 0.2.0, the oldest supported release.
 - Features newer than the npm release are detected at runtime (`betterIamFeatures(iam)`), never assumed. Today that
-  is **guests**: on 0.2.0, outsiders get member invitations only when the host passes `externalInvites: 'members'`;
+  is **guests** (0.3.0 and later): on 0.2.x, outsiders get member invitations only when the host passes `externalInvites: 'members'`;
   they join the `Better Files outsiders` group, which keeps them `guest: true` for Better Files. Otherwise inviting an
   outsider reports `UNSUPPORTED`. `systemPolicy(iam)` names only the actions that release knows.
-
-When Better IAM 0.3.0 ships guests, widen the peer range and make guests the tested default.
 
 ### Tests
 
@@ -1082,7 +1081,7 @@ Since you own Better IAM, these changes (in priority order) would simplify Bette
 11. **Optional framework peers.** `better-iam` depends on `@better-iam/{next,react,vue,svelte,nestjs,react-router}`, whose
     framework peers (`next`, `react`, `vue`, `svelte`, `@nestjs/core`, …) are required, so `npm install better-iam`
     installs every framework plus `sharp` (through `next`). Marking them optional in each binding's
-    `peerDependenciesMeta` fixes it; `pnpm smoke:packed` reports it as an upstream warning until then.
+    `peerDependenciesMeta` fixes it. **Done in better-iam 0.3.0**; `pnpm smoke:packed` no longer warns.
 
 Better Files keeps a fallback for each until its minimum supported Better IAM version includes the change.
 

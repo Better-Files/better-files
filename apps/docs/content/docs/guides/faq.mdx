@@ -44,7 +44,7 @@ You could implement that interface for another identity system, but Better Files
 prototypes, `better-files/testing` has `fakeIam`, an in-memory stand-in (see the
 [quickstart](/docs/guides/quickstart) and [testing](/docs/operations/testing)).
 
-Better Files works with `better-iam` 0.2.x from npm. Some features depend on the release; see
+Better Files works with `better-iam` 0.2.x and 0.3.x from npm. Some features depend on the release; see
 [release compatibility](/docs/guides/better-iam/compatibility).
 
 </Accordion>
@@ -86,9 +86,9 @@ and [deployment](/docs/operations/deployment).
 </Accordion>
 <Accordion title="How do people from outside the organization get in?">
 
-You invite them into a room by email, with `members.invite`. With a Better IAM release that has guests, they become
-Better IAM guests: sponsored, time-limited and inside a guest boundary. Better IAM 0.2.0 on npm has no guests, so
-inviting an outsider reports `UNSUPPORTED` until you set `externalInvites: 'members'` on the integration. They are
+You invite them into a room by email, with `members.invite`. With Better IAM 0.3 or later, they become Better IAM
+guests: sponsored, time-limited and inside a guest boundary. Better IAM 0.2.x has no guests, so inviting an outsider
+reports `UNSUPPORTED` there until you set `externalInvites: 'members'` on the integration. They are
 then invited as tenant members, and also join a group that marks them as outsiders. To share by link instead, the
 [share links plugin](/docs/plugins/links) adds links with passwords, email capture, expiry and use caps. See
 [outsiders](/docs/guides/better-iam/outsiders).

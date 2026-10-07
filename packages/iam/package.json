@@ -48,9 +48,9 @@
     "@better-files/core": "workspace:*"
   },
   "peerDependencies": {
-    "better-iam": ">=0.2.0 <0.3.0"
+    "better-iam": ">=0.2.0 <0.4.0"
   },
   "devDependencies": {
-    "better-iam": "^0.2.0"
+    "better-iam": "^0.3.0"
   }
 }

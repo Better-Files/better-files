@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- **better-iam 0.3.** Better Files now supports `better-iam` `>=0.2.0 <0.4.0` and develops against 0.3.0. On 0.3,
+  outsiders are invited as Better IAM guests by default, and `systemPolicy(iam)` includes the guest actions: update
+  the service account's role after upgrading. 0.3 also stops installing every framework through Better IAM's
+  bindings. CI runs the suite against 0.3, 0.2.0 and Better IAM's `main` branch. See the docs' release compatibility
+  page for the upgrade notes.
+- **Railway.** `railway.json` deploys the docs site with `apps/docs/Dockerfile`.
+
 - **Renamed to Better Files.** The umbrella package is `better-files` (was `@better-iam/datarooms`). The parts are
   `@better-files/<name>` (was `@better-iam/datarooms-<name>`), and the CLI is `better-files`. APIs follow:
   - `betterFiles()` (was `dataRooms()`), `BetterFilesError`, `BetterFilesPlugin`, `betterFilesIamPlugin`, and so on.

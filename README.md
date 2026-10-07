@@ -12,7 +12,7 @@ See [PLAN.md](PLAN.md) for the design and roadmap.
 npm install better-files better-iam
 ```
 
-Works with `better-iam` 0.2.x from npm. With pnpm 10 or later, allow better-iam's password hashing to build
+Works with `better-iam` 0.2.x and 0.3.x from npm (developed against 0.3). With pnpm 10 or later, allow better-iam's password hashing to build
 (`pnpm approve-builds`, or `allowBuilds: { argon2: true }` in `pnpm-workspace.yaml`).
 
 ## Set up
@@ -127,7 +127,7 @@ Every folder and document operation must pass two layers:
 
 `betterIamIntegration` checks what the instance offers (`betterIamFeatures(iam)`) instead of assuming it:
 
-| Feature                        | npm 0.2.0                          | Better IAM `main`         |
+| Feature                        | better-iam 0.2.x                   | better-iam 0.3.x          |
 | ------------------------------ | ---------------------------------- | ------------------------- |
 | Sessions, groups, room roles   | yes                                | yes                       |
 | Policies, `listAccessible`     | yes                                | yes                       |
@@ -135,8 +135,8 @@ Every folder and document operation must pass two layers:
 | Inviting people from outside   | member invitations, opt-in (below) | guests (sponsored, timed) |
 | Withdrawing unaccepted invites | yes                                | yes                       |
 
-Better IAM 0.2.0 has no guests. Inviting someone from outside the organization reports `UNSUPPORTED` until you choose
-the fallback:
+On 0.3, outsiders become Better IAM guests by default. Better IAM 0.2.x has no guests: there, inviting someone from
+outside the organization reports `UNSUPPORTED` until you choose the fallback (or upgrade):
 
 ```ts
 betterIamIntegration(iam, { iamPlugin, systemCredential, externalInvites: 'members' });

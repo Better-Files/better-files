@@ -79,7 +79,7 @@ npm install better-files better-iam
 ```
 
 - **Node.js 22.12 or newer.** Better Files is ESM-only: set `"type": "module"` in your `package.json`.
-- **Better IAM 0.2.x.** `better-iam` is an optional peer dependency of `better-files` (`>=0.2.0 <0.3.0`). Some
+- **Better IAM 0.2.x or 0.3.x.** `better-iam` is an optional peer dependency of `better-files` (`>=0.2.0 <0.4.0`). Some
   features depend on the release; see [release compatibility](/docs/guides/better-iam/compatibility).
 - **Native builds.** With pnpm 10 or later, allow Better IAM's password hashing to build: run
   `pnpm approve-builds`, or add `allowBuilds: { argon2: true }` to `pnpm-workspace.yaml`. The SQLite adapter uses the

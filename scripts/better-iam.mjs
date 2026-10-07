@@ -1,7 +1,7 @@
 // Chooses the Better IAM the workspace develops against: the npm release (the default, what users install) or a
 // local checkout (to try unreleased Better IAM changes; CI's compatibility job uses Better IAM's main branch).
 //
-//   node scripts/better-iam.mjs npm [range]        # default range ^0.2.0
+//   node scripts/better-iam.mjs npm [range]        # default range ^0.3.0
 //   node scripts/better-iam.mjs link ../better-iam # a checkout built with `pnpm build`
 //
 // Rewrites the `better-iam` devDependency of the root and of every package that declares it as a peer, then run
@@ -28,7 +28,7 @@ if (mode === 'link') {
 }
 const spec = (directory) =>
   mode === 'npm'
-    ? (argument ?? '^0.2.0')
+    ? (argument ?? '^0.3.0')
     : `link:${relative(directory, target).replaceAll('\\', '/')}`;
 
 const manifests = [

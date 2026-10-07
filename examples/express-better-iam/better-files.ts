@@ -76,7 +76,7 @@ export const dr = betterFiles({
     iamPlugin,
     // A per-tenant service account allowed the actions in `systemPolicy(iam)`: registers rooms, roles and guests.
     systemCredential: () => ({ token: env('BETTER_FILES_SERVICE_TOKEN') }),
-    // better-iam 0.2.0 (npm) has no guests: invite outsiders as tenant members, which this app's roles give nothing.
+    // better-iam 0.2.x has no guests: there, invite outsiders as tenant members, which this app's roles give nothing.
     ...(betterIamFeatures(iam).guests ? {} : { externalInvites: 'members' as const }),
   }),
   database: sqliteAdapter({ filename: process.env.BETTER_FILES_DB ?? 'better-files.db' }),

@@ -278,7 +278,7 @@ export const dr = betterFiles({
     iamPlugin,
     // A service account allowed the actions in systemPolicy(iam).
     systemCredential: () => ({ token: process.env.BETTER_FILES_SERVICE_TOKEN! }),
-    // better-iam 0.2.0 on npm has no guests: invite outsiders as tenant members instead.
+    // better-iam 0.2.x has no guests: there, invite outsiders as tenant members instead.
     ...(betterIamFeatures(iam).guests ? {} : { externalInvites: 'members' as const }),
   }),
   database: sqliteAdapter({ filename: 'better-files.db' }),

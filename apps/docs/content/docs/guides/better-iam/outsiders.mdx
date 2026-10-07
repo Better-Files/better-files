@@ -1,6 +1,6 @@
 ---
 title: Outsiders
-description: Invite people from outside the organization - bidders, counsel, auditors - as Better IAM guests, or as contained members on releases without guests.
+description: Invite people from outside the organization - bidders, counsel, auditors - as Better IAM guests (better-iam 0.3), or as contained members on 0.2.
 icon: UserPlus
 packages: ['@better-files/iam']
 sources:
@@ -37,14 +37,14 @@ invited depends on the Better IAM release.
 
 ## Guests
 
-On a Better IAM release with guests (its `main` branch today), outsiders become **Better IAM guests**: sponsored by
+On Better IAM 0.3 and later, outsiders become **Better IAM guests**: sponsored by
 the person who invited them, limited to `accessDays`, and inside the tenant's guest boundary, the ceiling Better IAM
 applies to every guest. This is the default whenever the instance has the guests API.
 
-## Member invitations, on releases without guests
+## Member invitations, on Better IAM 0.2
 
-Better IAM 0.2.0, the release on npm, has no guests. Inviting an outsider then reports `UNSUPPORTED` until you choose
-the fallback:
+Better IAM 0.2.x has no guests. Inviting an outsider then reports `UNSUPPORTED` until you choose the fallback (or
+upgrade to 0.3, see [release compatibility](/docs/guides/better-iam/compatibility#upgrading-from-02-to-03)):
 
 ```ts
 betterIamIntegration(iam, { iamPlugin, systemCredential, externalInvites: 'members' });

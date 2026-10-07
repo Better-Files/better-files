@@ -369,7 +369,7 @@
     "@better-files/vue": "workspace:*"
   },
   "peerDependencies": {
-    "better-iam": ">=0.2.0 <0.3.0"
+    "better-iam": ">=0.2.0 <0.4.0"
   },
   "peerDependenciesMeta": {
     "better-iam": {
@@ -377,7 +377,7 @@
     }
   },
   "devDependencies": {
-    "better-iam": "^0.2.0"
+    "better-iam": "^0.3.0"
   },
   "bin": {
     "better-files": "./dist/bin.js"
