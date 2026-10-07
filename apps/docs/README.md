@@ -36,12 +36,28 @@ Run `node apps/docs/scripts/check-content.mjs [section/page]` before building. I
 that JSX components are registered or imported, checks frontmatter, and checks that `/docs/...` links and `#anchors`
 exist.
 
+## Deploying on Railway
+
+The repository root has a `railway.json` that builds this site with `apps/docs/Dockerfile`: create a Railway service
+from the GitHub repository and it deploys on every push that touches the site or the packages (`watchPatterns`).
+The image installs and builds the whole workspace, then builds the site and runs `next start` on Railway's `$PORT`;
+the health check is `/`.
+
+Railway passes its `RAILWAY_PUBLIC_DOMAIN` to the build, so canonical URLs, the sitemap and `llms.txt` use the
+service's domain. For a custom domain, set `DOCS_SITE_URL` (for example `https://better-files.dev`) as a service
+variable; it is baked in at build time, so redeploy after changing it.
+
+```sh
+docker build -f apps/docs/Dockerfile -t better-files-docs .   # the same image locally
+docker run -p 3000:3000 better-files-docs
+```
+
 ## Configuration
 
 | Variable                                                                                   | Default                                                        | Purpose                                                   |
 | ------------------------------------------------------------------------------------------ | -------------------------------------------------------------- | --------------------------------------------------------- |
 | `DOCS_SITE_URL`                                                                            | `https://$RAILWAY_PUBLIC_DOMAIN`, else `http://localhost:4000` | Canonical origin for metadata, the sitemap and `llms.txt` |
-| `NEXT_PUBLIC_DOCS_REPOSITORY_URL`                                                          | `https://github.com/Better-Files/better-files`                   | GitHub button, "Edit this page", source and issue links   |
+| `NEXT_PUBLIC_DOCS_REPOSITORY_URL`                                                          | `https://github.com/Better-Files/better-files`                 | GitHub button, "Edit this page", source and issue links   |
 | `NEXT_PUBLIC_DOCS_REPOSITORY_BRANCH`                                                       | `main`                                                         | Branch for source and edit links                          |
 | `DOCS_X_HANDLE`                                                                            | none                                                           | `twitter:site` on social cards                            |
 | `DOCS_GOOGLE_SITE_VERIFICATION`, `DOCS_BING_SITE_VERIFICATION`, `DOCS_YANDEX_VERIFICATION` | none                                                           | Search console verification tags                          |
