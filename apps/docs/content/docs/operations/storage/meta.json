@@ -1,0 +1,5 @@
+{
+  "title": "Storage",
+  "icon": "HardDrive",
+  "pages": ["index", "s3", "filesystem", "gcs-and-azure", "regional", "cluster"]
+}

@@ -1,0 +1,213 @@
+---
+title: GCS and Azure
+description: Store files in Google Cloud Storage with gcsStorage or Azure Blob Storage with azureBlobStorage, both over fetch without cloud SDKs.
+metaTitle: Google Cloud Storage and Azure Blob
+icon: Globe
+packages: ['@better-files/storage-gcs', '@better-files/storage-azure']
+sources:
+  - packages/storage-gcs/src/index.ts
+  - packages/storage-gcs/src/auth.ts
+  - packages/storage-gcs/README.md
+  - packages/storage-azure/src/index.ts
+  - packages/storage-azure/src/auth.ts
+  - packages/storage-azure/README.md
+  - packages/client/src/index.ts
+  - tests/storage/gcs.test.ts
+  - tests/storage/azure.test.ts
+---
+
+On Google Cloud or Azure, files belong in the platform's own object storage. Neither service speaks the S3 API in
+full, so Better Files has an adapter for each. Both call the service's REST API over `fetch`, sign their own requests
+and URLs, and need no cloud SDK.
+
+<Tabs items={['Google Cloud Storage', 'Azure Blob Storage']} groupId="cloud">
+  <Tab value="Google Cloud Storage">
+    ```ts
+    import { gcsStorage } from 'better-files/storage-gcs';
+
+    const storage = gcsStorage({
+      bucket: 'acme-rooms',
+      // The parsed JSON key file. It also enables signed URLs, which direct uploads need.
+      credentials: { serviceAccount: JSON.parse(process.env.GCS_KEY!) },
+    });
+    ```
+  </Tab>
+  <Tab value="Azure Blob Storage">
+    ```ts
+    import { azureBlobStorage, parseConnectionString } from 'better-files/storage-azure';
+
+    const storage = azureBlobStorage({
+      ...parseConnectionString(process.env.AZURE_STORAGE_CONNECTION_STRING!),
+      container: 'rooms',
+    });
+    ```
+  </Tab>
+</Tabs>
+
+Pass the result as `storage` to `betterFiles()`.
+
+## Google Cloud Storage
+
+`gcsStorage` uses the GCS JSON API for reads, writes and copies, and the XML API for signed URLs.
+
+<TypeTable
+  type={{
+    bucket: { type: 'string', description: 'The bucket name.', required: true },
+    credentials: {
+      type: '{ serviceAccount: GoogleServiceAccountKey } | { accessToken: Secret }',
+      description: 'A service-account key, or an OAuth access token (a string, or a function returning one).',
+      required: true,
+    },
+    prefix: { type: 'string', description: 'Prepended to every key, so several apps can share a bucket.' },
+    endpoint: {
+      type: 'string',
+      description: 'The API origin. Point it at fake-gcs-server or another emulator in tests.',
+      default: "'https://storage.googleapis.com'",
+    },
+    retries: {
+      type: 'number',
+      description: 'Retries for 429 and 5xx answers on requests whose body can be sent again, with exponential backoff.',
+      default: '3',
+    },
+    fetch: { type: 'typeof fetch', description: 'The fetch implementation.', default: 'globalThis.fetch' },
+  }}
+/>
+
+### Authentication
+
+- **`{ serviceAccount }`** takes the parsed JSON key file (`client_email`, `private_key`, optional `token_uri`). The
+  adapter mints access tokens itself with the JWT bearer grant, caches each one until a minute before it expires, and
+  signs V4 URLs (`GOOG4-RSA-SHA256`) locally with the private key.
+- **`{ accessToken }`** takes a token with the `devstorage.read_write` scope, or a function that returns a fresh one.
+  Use it for workload identity or `google-auth-library`. Emulators accept any token. With an access token the adapter
+  cannot sign URLs, so it has no `presign` or `presignPart`, and direct uploads are refused with `UNSUPPORTED`.
+
+The identity needs `roles/storage.objectUser` on the bucket.
+
+### Multipart uploads
+
+The JSON API has no S3-style multipart upload, so the adapter builds one:
+
+1. `create` only makes an upload id; nothing is written.
+2. Each part is stored as a temporary object, `.better-files-multipart/{uploadId}/{part}` under the prefix. Part
+   numbers run from 1 to 10,000.
+3. `complete` joins the parts with GCS `compose`, at most 32 per call, in rounds when there are more. Each part's
+   generation is pinned, so a part that was replaced after it was uploaded fails the upload.
+4. The temporary parts are then deleted. `abort` lists and deletes them.
+
+Keys under `.better-files-multipart` are refused for ordinary objects. Add a lifecycle rule that deletes objects under
+that prefix after a few days, to clean up uploads abandoned without an abort.
+
+Copies use `rewrite`, which may take several calls for large objects; the adapter follows them.
+
+### Direct uploads
+
+With a service-account key, `presignPart` signs a `PUT` URL for one part object. The bucket's CORS configuration must
+allow `PUT` from your app's origin and expose `ETag`:
+
+```sh
+cat > cors.json <<'EOF'
+[{ "origin": ["https://app.example.com"], "method": ["PUT"], "responseHeader": ["ETag"], "maxAgeSeconds": 3600 }]
+EOF
+gcloud storage buckets update gs://acme-rooms --cors-file=cors.json
+```
+
+A part uploaded through a signed URL returns an MD5 ETag rather than a generation, so its generation is not pinned
+at completion. The server still reads the finished file back and accepts it only if every segment decrypts. Signed
+URLs last between 1 second and 7 days.
+
+### Helpers
+
+`better-files/storage-gcs` also exports `serviceAccountTokens(key, { scope?, fetch?, now? })`, `signedUrl(input)`,
+`encodeRfc3986(value)` and the default scope `STORAGE_SCOPE`.
+
+## Azure Blob Storage
+
+`azureBlobStorage` stores block blobs through the Blob service REST API (version `2023-11-03`).
+
+<TypeTable
+  type={{
+    account: { type: 'string', description: 'The storage account name.', required: true },
+    container: {
+      type: 'string',
+      description: 'The container: 3 to 63 lower-case letters, digits and single hyphens.',
+      required: true,
+    },
+    credentials: {
+      type: '{ accountKey: string } | { sasToken: string } | { accessToken: Secret }',
+      description: 'Shared Key, a SAS token, or a Microsoft Entra ID token (a string, or a function returning one).',
+      required: true,
+    },
+    endpoint: {
+      type: 'string',
+      description: 'The blob endpoint. For Azurite use http://127.0.0.1:10000/devstoreaccount1.',
+      default: "'https://{account}.blob.core.windows.net'",
+    },
+    prefix: { type: 'string', description: 'Prepended to every key, so several apps can share a container.' },
+    retries: {
+      type: 'number',
+      description: 'Retries for 429 and 5xx answers on requests whose body can be sent again.',
+      default: '3',
+    },
+    copyTimeoutMs: {
+      type: 'number',
+      description: 'How long copy waits for an asynchronous server-side copy to finish.',
+      default: '60000',
+    },
+    fetch: { type: 'typeof fetch', description: 'The fetch implementation.', default: 'globalThis.fetch' },
+  }}
+/>
+
+### Authentication
+
+- **`{ accountKey }`** signs every request with Shared Key and enables service SAS URLs, which `presign` and direct
+  uploads use.
+- **`{ sasToken }`** is a container or account SAS with read, create, write and delete rights. It is appended to
+  every request.
+- **`{ accessToken }`** is a Microsoft Entra ID token for `https://storage.azure.com/`, or a function that returns
+  one (managed identity, `@azure/identity`). The identity needs the Storage Blob Data Contributor role.
+
+With a SAS token or an access token the adapter cannot presign, so direct uploads are refused with `UNSUPPORTED` and
+files go through your server.
+
+`parseConnectionString(value)` reads a connection string into `{ account, endpoint, credentials }`. It understands
+the account-key and `SharedAccessSignature` forms, `BlobEndpoint`, and `UseDevelopmentStorage=true` for Azurite.
+
+### Multipart uploads
+
+Parts map onto staged blocks:
+
+- Each part is a `Put Block`. The block id is derived from the upload id and the part number, never taken from the
+  caller. Part numbers run from 1 to 50,000.
+- `complete` commits the blocks in part order with `Put Block List`.
+- Azure has no call to discard staged blocks, so `abort` leaves them. They never become visible, and the service
+  drops uncommitted blocks after seven days.
+
+A single `put` takes at most 5,000 MiB; Better Files sends larger files in parts. A copy that Azure reports as
+`pending` is polled until it succeeds, for at most `copyTimeoutMs`.
+
+### Direct uploads
+
+With an account key, `presignPart` signs a SAS URL that allows one `Put Block`. `Put Block` answers without an
+`ETag`; the browser client reads the `Content-MD5` (or `x-ms-content-crc64`) header instead, and the adapter derives
+the block ids itself. The storage account's CORS rules for the Blob service must allow `PUT` from your app's origin
+and expose `Content-MD5`:
+
+```sh
+az storage cors add --services b --methods PUT --origins https://app.example.com \
+  --allowed-headers '*' --exposed-headers Content-MD5 x-ms-content-crc64 --max-age 3600 \
+  --account-name acmerooms
+```
+
+SAS URLs last between 1 second and 7 days, and start five minutes in the past to allow for clock skew.
+
+### Helpers
+
+`better-files/storage-azure` also exports `sharedKeyAuthorization(input)`, `blobSas(input)` and
+`AZURE_STORAGE_VERSION`.
+
+## Related
+
+- [Storage overview](/docs/operations/storage)
+- [Encryption](/docs/operations/encryption): `gcpKms` and `azureKeyVault` keep data keys in the same cloud.
+- [Data residency](/docs/operations/storage/regional)

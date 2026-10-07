@@ -1,0 +1,51 @@
+{
+  "name": "@better-files/plugin-notifications",
+  "version": "0.1.0",
+  "description": "Email notifications and daily digests for Better Files, with per-room preferences.",
+  "type": "module",
+  "license": "Apache-2.0",
+  "author": "Better Files contributors",
+  "homepage": "https://github.com/Better-Files/better-files/tree/main/packages/plugin-notifications#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Better-Files/better-files.git",
+    "directory": "packages/plugin-notifications"
+  },
+  "bugs": {
+    "url": "https://github.com/Better-Files/better-files/issues"
+  },
+  "keywords": [
+    "data-room",
+    "better-iam",
+    "typescript",
+    "notifications",
+    "email",
+    "plugin"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "sideEffects": false,
+  "scripts": {
+    "build": "tsc -b"
+  },
+  "dependencies": {
+    "@better-files/core": "workspace:*"
+  }
+}

@@ -1,0 +1,215 @@
+---
+title: Data residency
+description: Keep each room's files in a chosen region with regionalStorage, key them in that region's KMS, and move rooms between regions.
+metaTitle: Data residency per room
+icon: Globe
+packages: ['@better-files/storage-regional', '@better-files/kms']
+sources:
+  - packages/storage-regional/src/index.ts
+  - packages/storage-regional/README.md
+  - packages/core/src/ports.ts
+  - packages/core/src/tables.ts
+  - packages/server/src/files.ts
+  - packages/server/src/endpoints/rooms.ts
+  - packages/server/src/endpoints/common.ts
+  - packages/kms/src/regional.ts
+  - packages/kms/README.md
+  - tests/storage/regional.test.ts
+---
+
+A Swiss client's deal room may have to stay in Switzerland, while a US deal sits in the United States. Data residency
+in Better Files works per room: each room gets a **region** when it is created, and every file of the room is stored
+in that region's storage. `regionalStorage` is a storage adapter that holds one adapter per region and routes each
+object to the right one.
+
+```ts
+import { betterFiles } from 'better-files';
+import { regionalStorage } from 'better-files/storage-regional';
+import { s3Storage } from 'better-files/storage-s3';
+
+export const dr = betterFiles({
+  // iam, database, secret, encryption, plugins …
+  storage: regionalStorage({
+    regions: {
+      eu: s3Storage({ region: 'eu-central-1', bucket: 'rooms-eu' }),
+      us: s3Storage({ region: 'us-east-1', bucket: 'rooms-us' }),
+      ch: s3Storage({ region: 'eu-central-2', bucket: 'rooms-ch' }),
+    },
+    defaultRegion: 'eu',
+  }),
+});
+
+const room = await dr.api.rooms.create(credential, { tenantId, name: 'Project Alpine', region: 'ch' });
+room.region; // 'ch'
+```
+
+## Options
+
+<TypeTable
+  type={{
+    regions: {
+      type: 'Record of StorageAdapter',
+      description: 'One adapter per region, by name: 1 to 32 lower-case letters, digits and dashes, starting with a letter or digit.',
+      required: true,
+    },
+    defaultRegion: {
+      type: 'string | (input: { tenantId }) => string | Promise of string',
+      description: 'The region rooms get when rooms.create names none: one name, or one per tenant.',
+      required: true,
+    },
+    allows: {
+      type: '(input: { tenantId, region }) => boolean | Promise of boolean',
+      description: 'Whether a tenant may place rooms in a region, for contractual residency.',
+      default: 'every region',
+    },
+    unplacedRegion: {
+      type: 'string',
+      description: 'Where objects without a region prefix live: files stored before residency was turned on. Required when defaultRegion is a function.',
+      default: 'defaultRegion, when it is a name',
+    },
+  }}
+/>
+
+`regionalStorage` checks its configuration when it is created and throws `INVALID_CONFIG` for an empty `regions`, a
+bad region name, or a `defaultRegion` or `unplacedRegion` that is not one of the regions.
+
+```ts
+storage: regionalStorage({
+  regions: { eu, us },
+  defaultRegion: ({ tenantId }) => contracts.regionOf(tenantId) ?? 'eu',
+  unplacedRegion: 'eu',
+  allows: ({ tenantId, region }) => contracts.allows(tenantId, region),
+}),
+```
+
+## How a room gets its region
+
+`rooms.create` takes an optional `region` (1 to 32 lower-case letters, digits and dashes). The room's region is:
+
+1. the `region` input, if given;
+2. otherwise `defaultRegion`, called with the tenant when it is a function.
+
+| Situation | Result |
+| --- | --- |
+| The region is not one of the storage's regions | `INVALID_INPUT` ("Unknown region …; available: …") |
+| `allows` returns false for the tenant and region | `FORBIDDEN` |
+| `region` is given but the storage adapter is not regional | `UNSUPPORTED` |
+| No `region` and the storage is not regional | the room has no region |
+
+The region is stored on the room (`rooms.region`) and returned with it. It is set at creation; the room API has no
+call to change it. To move a room, use [`moveRoom`](#move-a-room).
+
+## How files are routed
+
+The server builds each file's storage key from the room's region: `g/{region}/t/{hash}/r/{hash}/{blobId}`.
+`regionalStorage` reads the region from that prefix and hands the key, without the prefix, to the region's adapter.
+Routing needs no lookups, and each region's bucket holds ordinary keys.
+
+- Keys without a `g/{region}/` prefix go to `unplacedRegion`. These are files stored before you switched to
+  `regionalStorage`, so turning residency on needs no migration.
+- A key that names a region the configuration no longer has is refused with `INTERNAL_ERROR`. Objects are never read
+  from or written to another region.
+- `regionOf(key)` returns the region a key routes to.
+- `copy` within one region uses that adapter's `copy`; across regions it streams the object from one adapter to the
+  other.
+- `multipart`, `multipart.presignPart` (direct uploads) and `presign` are available only when every region's adapter
+  has them. Mixing a [local-disk](/docs/operations/storage/filesystem) region with S3 regions turns direct uploads off
+  everywhere.
+
+## Keys in the room's region
+
+Residency usually covers keys as well as bytes. When a room is created, the key provider's `createRoomKey` receives
+the room's `region`, so a provider can create the room key in that region's KMS. `regionalKeys` from
+`better-files/kms` does this with one provider per region:
+
+```ts
+import { awsKms, regionalKeys } from 'better-files/kms';
+
+export const dr = betterFiles({
+  // …
+  storage: regionalStorage({ regions: { eu, us }, defaultRegion: 'eu' }),
+  encryption: {
+    keys: regionalKeys({
+      regions: {
+        eu: awsKms({ region: 'eu-central-1', keyId: 'alias/better-files', perRoomKeys: true }),
+        us: awsKms({ region: 'us-east-1', keyId: 'alias/better-files', perRoomKeys: true }),
+      },
+      defaultRegion: 'eu',
+    }),
+  },
+});
+```
+
+- Every room's key reference starts with its region (`region:eu:…`), even when the regional provider has no keys per
+  room, so wrapping and unwrapping always go to the same region.
+- Creating a room in a region with no key provider fails with `INVALID_CONFIG` instead of using another region's key.
+- Key references made before `regionalKeys` belong to its `defaultRegion`.
+- Region names in `regionalKeys` must match the storage's region names.
+
+See [Encryption](/docs/operations/encryption) for the providers.
+
+## Move a room
+
+`moveRoom` moves a room's files to another region and records the new region on the room:
+
+```ts
+import { moveRoom } from 'better-files/storage-regional';
+
+const result = await moveRoom({ database, storage, tenantId, roomId, to: 'us' });
+// { from: 'eu', to: 'us', moved: 120, skipped: 0, pendingUploads: 0 }
+```
+
+Pass the same `database` and `storage` you gave `betterFiles()`, after `betterFiles()` has been created (it binds the
+database to the schema). It runs in this order:
+
+<Steps>
+  <Step>
+    Points the room at the new region, so files uploaded while the move runs are stored there already.
+  </Step>
+  <Step>
+    Copies each stored object of the room (every version and rendition) to the same key under the new region's
+    prefix, checks the copy's size, repoints the blob row, and deletes the old copy.
+  </Step>
+  <Step>
+    Counts uploads still open with keys in the old region as `pendingUploads`. They finish in the old region; run
+    `moveRoom` again once they have completed or expired.
+  </Step>
+</Steps>
+
+<TypeTable
+  type={{
+    database: { type: 'DatabaseAdapter', description: 'The database given to betterFiles().', required: true },
+    storage: { type: 'RegionalStorage', description: 'The regionalStorage given to betterFiles().', required: true },
+    tenantId: { type: 'string', description: 'The room\'s tenant.', required: true },
+    roomId: { type: 'string', description: 'The room.', required: true },
+    to: { type: 'string', description: 'The target region.', required: true },
+    deleteSource: {
+      type: 'boolean',
+      description: 'Delete each old copy once its blob points at the new one.',
+      default: 'true',
+    },
+    onProgress: {
+      type: '(progress: { moved, total }) => void',
+      description: 'Called after each object, for progress reporting.',
+    },
+  }}
+/>
+
+- **Resumable.** Objects already in the target region are skipped (`skipped`), so an interrupted move can run again.
+- **Checks.** An unknown target region is `INVALID_INPUT`, a room that does not exist is `NOT_FOUND`, and a region
+  `allows` refuses is `FORBIDDEN`. A copy whose size differs from the stored size stops the move with
+  `INTERNAL_ERROR`.
+- **Keys stay.** Wrapped data keys do not depend on the storage key, so they stay valid. A room key created in one
+  region's KMS stays in that KMS after the move.
+- **Run it offline.** It copies every version of every document, so run it from a maintenance script or a job, not a
+  request handler. Downloads streaming while their object moves can fail and need retrying; move rooms outside busy
+  hours, or pass `deleteSource: false` and delete the old copies later.
+
+`rekey(key, region)` returns the key an object gets in another region.
+
+## Related
+
+- [Storage overview](/docs/operations/storage)
+- [Encryption](/docs/operations/encryption)
+- [Rooms and content](/docs/guides/concepts/rooms-and-content)
+- [Maintenance and jobs](/docs/operations/maintenance-and-jobs)

@@ -1,0 +1,14 @@
+{
+  "title": "Concepts",
+  "icon": "Library",
+  "pages": [
+    "index",
+    "rooms-and-content",
+    "permissions",
+    "members-and-groups",
+    "uploads-and-downloads",
+    "activity-log",
+    "events-and-live",
+    "schema"
+  ]
+}

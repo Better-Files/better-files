@@ -1,0 +1,129 @@
+---
+title: NestJS
+metaTitle: Better Files for NestJS
+description: A global module that mounts the protocol, a guard driven by @RequireCapability, and the API bound to the caller through a decorator or a service.
+icon: NestJS
+packages:
+  - '@better-files/nestjs'
+  - '@better-files/middleware'
+sources:
+  - packages/nestjs/src/index.ts
+  - examples/nestjs/app.module.ts
+  - docs/guides/frameworks/nestjs.md
+---
+
+`better-files/nestjs` provides `BetterFilesModule`, which mounts the protocol and registers a global guard, the
+`@RequireCapability` decorator, `@BetterFilesApi()` for handlers and `BetterFilesService` for services.
+
+## Register the module
+
+```ts title="src/app.module.ts"
+import { Module } from '@nestjs/common';
+import { BetterFilesModule } from 'better-files/nestjs';
+import { dr } from './better-files';
+import { DealsController } from './deals.controller';
+
+@Module({ imports: [BetterFilesModule.forRoot({ dr })], controllers: [DealsController] })
+export class AppModule {}
+```
+
+| Option  | Default | What it does                                                                              |
+| ------- | ------- | ----------------------------------------------------------------------------------------- |
+| `dr`    | (none)  | The `betterFiles()` instance, also injectable with the `BETTER_FILES` token.              |
+| `mount` | `true`  | Serves the protocol under `basePath` on the Express platform.                             |
+| `guard` | `true`  | Registers `BetterFilesGuard` globally, so `@RequireCapability` works without `@UseGuards`. |
+
+Run `await dr.initialize()` before `NestFactory.create(AppModule)`, or at deploy time with
+`npx better-files migrate`. The module is global, so other modules inject `BetterFilesService` without importing it.
+
+## Guard routes and call the API
+
+```ts title="src/deals.controller.ts"
+import { Controller, Get, Param } from '@nestjs/common';
+import type { BoundApi } from 'better-files/middleware';
+import { BetterFilesApi, RequireCapability } from 'better-files/nestjs';
+import type { dr } from './better-files';
+
+@Controller('deals')
+export class DealsController {
+  @Get(':tenantId/:roomId/documents/:nodeId')
+  @RequireCapability(['VIEW'], {
+    tenantId: 'params.tenantId',
+    roomId: 'params.roomId',
+    nodeId: 'params.nodeId',
+  })
+  document(
+    @Param('tenantId') tenantId: string,
+    @Param('nodeId') nodeId: string,
+    @BetterFilesApi() api: BoundApi<typeof dr.api>,
+  ) {
+    return api.documents.get({ tenantId, nodeId });
+  }
+}
+```
+
+A selector is either a dotted path into the request (`params.x`, `query.x`, `body.x`) or a function
+`(request) => string | undefined`. Use a function to take the tenant from your session middleware:
+`tenantId: (request) => request.session.tenantId`.
+
+When the check fails, the guard throws Nest's own exceptions:
+
+| Situation                                 | Exception               |
+| ----------------------------------------- | ----------------------- |
+| No session                                | `UnauthorizedException` |
+| The node is hidden or missing             | `NotFoundException`     |
+| The node is visible, the capability isn't | `ForbiddenException`    |
+| Any other refusal (409, 423, 429…)        | `HttpException` with the protocol's error body |
+
+`toHttpException(error)` maps errors from your own `dr.api` calls the same way.
+
+## In services
+
+```ts title="src/deal.service.ts"
+import { Injectable } from '@nestjs/common';
+import { BetterFilesService } from 'better-files/nestjs';
+import type { dr } from './better-files';
+
+@Injectable()
+export class DealService {
+  constructor(private readonly files: BetterFilesService<typeof dr>) {}
+
+  list(headers: Record<string, string | string[] | undefined>, tenantId: string) {
+    return this.files.api({ headers }).rooms.list({ tenantId });
+  }
+}
+```
+
+`BetterFilesService.api()` accepts the request's headers or any credential, such as `{ token }`. The instance itself
+is `this.files.dr`.
+
+## With Better IAM's Nest module
+
+Import `IamModule.forRoot({ iam })` from `better-iam/nestjs` next to `BetterFilesModule`. Both read the same cookies
+or bearer token, so a person signed in to Better IAM is the caller in Better Files too.
+
+## Fastify platform
+
+`mount: true` uses Express middleware. On `@nestjs/platform-fastify`, set `mount: false` and register the
+[Fastify integration](/docs/frameworks/fastify) on the underlying instance:
+
+```ts
+import { betterFilesFastify } from 'better-files/middleware/fastify';
+
+// BetterFilesModule.forRoot({ dr, mount: false })
+const app = await NestFactory.create<NestFastifyApplication>(AppModule, new FastifyAdapter());
+await betterFilesFastify(app.getHttpAdapter().getInstance(), { dr });
+```
+
+## Maintenance
+
+Call `dr.maintain()` on a schedule, for example with `@nestjs/schedule`:
+
+```ts
+@Cron('*/5 * * * *')
+maintain() {
+  return dr.maintain();
+}
+```
+
+A complete example lives in `examples/nestjs` in the repository.

@@ -1,0 +1,54 @@
+{
+  "name": "@better-files/plugin-reviews",
+  "version": "0.1.0",
+  "description": "Access reviews for Better Files: periodic room access certifications with per-person keep or revoke decisions, recommendations from activity, self-review prevention, scheduled campaigns and revocation on completion",
+  "type": "module",
+  "license": "Apache-2.0",
+  "author": "Better Files contributors",
+  "homepage": "https://github.com/Better-Files/better-files/tree/main/packages/plugin-reviews#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Better-Files/better-files.git",
+    "directory": "packages/plugin-reviews"
+  },
+  "bugs": {
+    "url": "https://github.com/Better-Files/better-files/issues"
+  },
+  "keywords": [
+    "data-room",
+    "better-iam",
+    "typescript",
+    "data-room",
+    "better-iam",
+    "typescript",
+    "access-review",
+    "certification",
+    "compliance"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "sideEffects": false,
+  "scripts": {
+    "build": "tsc -b"
+  },
+  "dependencies": {
+    "@better-files/core": "workspace:*"
+  }
+}

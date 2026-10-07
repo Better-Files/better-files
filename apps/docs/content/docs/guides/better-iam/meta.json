@@ -1,0 +1,13 @@
+{
+  "title": "Better IAM",
+  "icon": "ShieldCheck",
+  "pages": [
+    "index",
+    "access-model",
+    "service-account",
+    "outsiders",
+    "keys-and-audit",
+    "managed-records",
+    "compatibility"
+  ]
+}

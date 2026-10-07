@@ -1,0 +1,125 @@
+---
+title: Analytics
+description: Engagement reports from the activity log, with views and downloads per person, team, document and day, and who has not opened a document.
+metaTitle: Engagement analytics for data rooms
+icon: FileChartColumnIncreasing
+packages: ['@better-files/plugin-analytics']
+sources:
+  - packages/plugin-analytics/src/index.ts
+  - packages/plugin-analytics/README.md
+  - packages/core/src/operations.ts
+  - packages/server/src/endpoints/nodes.ts
+  - tests/plugins/analytics-notifications.test.ts
+---
+
+In a sale process, engagement is a signal. The seller's adviser wants to know which bidder is reading the financial
+model and which has not opened the information memorandum a week after it went up. Those answers decide who gets a
+follow-up call, and who looks serious.
+
+The analytics plugin answers them from the room's activity log. It counts document views and downloads per person,
+per team and per document, with a daily series, and lists the members who have not opened a given document yet. It
+adds no tables and stores nothing: every report is computed when you ask for it.
+
+```ts
+import { betterFiles } from 'better-files';
+import { analyticsPlugin } from 'better-files/plugin-analytics';
+
+const plugins = [analyticsPlugin()] as const;
+
+export const dr = betterFiles({ /* iam, database, storage, secret */ plugins });
+
+const report = await dr.api.analytics.engagement(adviser, { tenantId, roomId, days: 14 });
+// report.totals: { views: 4, downloads: 1 }
+
+const notYet = await dr.api.analytics.unseen(adviser, { tenantId, roomId, nodeId: memorandumId });
+// [{ memberId, identityId, email, groupIds }, ...]
+```
+
+`analyticsPlugin()` takes no options. It adds no Better IAM actions: both endpoints are authorized as the core
+`better-files:activity:read`, which room `owner`, `admin` and `auditor` relations hold. Other participants get
+`FORBIDDEN`. Passing the plugin to `betterFilesIamPlugin({ plugins })` is harmless but not needed.
+
+## What is counted
+
+The plugin reads two kinds of activity records:
+
+- `document.viewed`, written each time someone is issued a viewer ticket (`documents.requestView`).
+- `document.downloaded`, written each time someone is issued a download ticket, watermarked
+  (`documents.requestDownload`) or original (`documents.requestOriginal`).
+
+So it counts requests to open or download a document, not time spent reading. Opening the same document three times
+counts three views. Activity from everyone counts, including the room's own administrators.
+
+## engagement
+
+`dr.api.analytics.engagement(credential, { tenantId, roomId, days? })` reports on the last `days` days (1 to 365,
+default 30). It works on closed rooms.
+
+<TypeTable
+  type={{
+    days: { type: 'number', description: 'The window the report covers.' },
+    totals: { type: '{ views: number; downloads: number }', description: 'All views and downloads in the window.' },
+    people: {
+      type: '{ identityId, email, views, downloads, documents, lastActiveAt }[]',
+      description: 'One entry per person with activity, most active first. documents is how many distinct documents they opened or downloaded; email is null for someone without a room membership; lastActiveAt is in epoch milliseconds.',
+    },
+    groups: {
+      type: '{ groupId, name, views, downloads, documents, lastActiveAt }[]',
+      description: 'One entry per permission group, adding up the activity of its members. A person in two groups counts in both.',
+    },
+    documents: {
+      type: '{ nodeId, name, people, views, downloads, lastActiveAt }[]',
+      description: 'One entry per document with activity, most active first. people is how many distinct people opened or downloaded it; name is null when the document no longer exists.',
+    },
+    series: {
+      type: '{ day: string; views: number; downloads: number }[]',
+      description: 'Activity per UTC day (YYYY-MM-DD), oldest first. Days without activity are left out.',
+    },
+  }}
+/>
+
+Activity is attributed to groups by each person's **current** room membership, not the membership they had at the
+time. Moving someone from "Bidder A" to "Bidder B" moves their past activity with them.
+
+## unseen
+
+`dr.api.analytics.unseen(credential, { tenantId, roomId, nodeId, days? })` lists the room's active members who have
+neither viewed nor downloaded the document in the last `days` days (1 to 3,650, default 3,650, about ten years). Each
+entry has `memberId`, `identityId`, `email` (or `null`) and `groupIds`. It works on closed rooms.
+
+- Invitations that nobody has accepted yet have no identity and are left out.
+- Members are listed whether or not they may see the document, so filter by `groupIds` before chasing people who
+  were never given access.
+- `nodeId` must be a document of the room; a folder or a document of another room fails with `NOT_FOUND`.
+
+## In the browser
+
+```tsx
+const report = useQuery(`analytics:${roomId}:30`, (client) =>
+  client.analytics.engagement({ roomId, days: 30 }),
+);
+```
+
+`series` fits a line or bar chart directly; `people` and `documents` are already sorted for a leaderboard.
+
+## Limits
+
+- Each report reads at most 100,000 activity records, 1,000 at a time, oldest first. In a very busy room the newest
+  activity in the window can be left out; shorten `days` to stay under the cap.
+- Reports are computed in memory on every call. Cache them, for example with `useQuery`, rather than polling.
+- The plugin records no activity and emits no events of its own.
+
+## Errors
+
+| Code | When |
+| --- | --- |
+| `INVALID_INPUT` | `days` is out of range, or an id is malformed. |
+| `FORBIDDEN` | The caller lacks `better-files:activity:read` on the room. |
+| `NOT_FOUND` | The room does not exist, or `nodeId` is not a document of the room. |
+
+## Related
+
+- [Audit reports](/docs/plugins/audit): participant and engagement reports as JSON or PDF, with chain integrity.
+- [Notifications](/docs/plugins/notifications): tell members about new documents.
+- [Q&A](/docs/plugins/qa): what bidders ask, next to what they read.
+- [React](/docs/frameworks/react): `useQuery` for cached reports.

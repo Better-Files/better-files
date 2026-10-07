@@ -1,0 +1,155 @@
+---
+title: Network rules
+description: Per-room IP allow-lists for guests or everyone. Outside the allowed networks a participant gets nothing in the room.
+metaTitle: Per-room IP allow-lists
+icon: Network
+packages: ['@better-files/plugin-network']
+sources:
+  - packages/plugin-network/src/index.ts
+  - packages/plugin-network/README.md
+  - packages/core/src/plugin.ts
+  - packages/core/src/operations.ts
+  - packages/server/src/pipeline.ts
+  - tests/plugins/network.test.ts
+---
+
+Some rooms may only be opened from known places: a bank's office network, a law firm's VPN, the client's own
+offices. A room administrator wants to say "guests may only connect from these address ranges" and know that someone
+on a home network or a hotel Wi-Fi sees nothing at all.
+
+The network plugin adds one rule per room: a list of allowed IP addresses and ranges, applied to everyone or only to
+guests. A participant connecting from anywhere else gets no capabilities in the room: no names, no viewing, no
+downloads. Room owners and administrators are exempt, so they cannot lock themselves out.
+
+```ts
+import { betterFiles } from 'better-files';
+import { betterFilesIamPlugin } from 'better-files/iam';
+import { networkPlugin } from 'better-files/plugin-network';
+
+const plugins = [networkPlugin()] as const;
+const iamPlugin = betterFilesIamPlugin({ plugins }); // registers the better-files:network:* actions
+
+export const dr = betterFiles({
+  /* iam, database, storage, secret */
+  plugins,
+  trustProxy: true, // only behind a proxy you control
+});
+
+await dr.api.network.set(credential, {
+  tenantId,
+  roomId,
+  allowedRanges: ['203.0.113.0/24', '2001:db8::/32'],
+  appliesTo: 'external', // only guests; 'everyone' restricts employees too
+});
+```
+
+The plugin owns the `networkRules` table; on a SQL database, run `better-files generate` and `better-files migrate`
+after adding it.
+
+## Where the address comes from
+
+The client address comes from the framework adapter (the socket's remote address, or Hono's connection info). Behind
+a proxy or load balancer, set `betterFiles({ trustProxy: true })` so it is read from the `x-forwarded-for` header
+instead. Only do this behind a proxy you control: otherwise a client can send any address it likes.
+
+Server-side `dr.api` calls carry no address unless you pass one as the third argument:
+
+```ts
+await dr.api.folders.list(credential, { tenantId, nodeId }, { ip: clientIp });
+```
+
+IPv4, IPv6 (with brackets or zone IDs) and IPv4-mapped IPv6 (`::ffff:192.0.2.1`, as Node reports IPv4 clients on a
+dual-stack socket) are understood. A mapped address matches IPv4 ranges.
+
+## Options
+
+<TypeTable
+  type={{
+    unknownAddress: {
+      type: "'deny' | 'allow'",
+      description: 'What to do when the request has no address, such as a server-side dr.api call without request info. deny gives a restricted participant nothing; allow suits hosts that call the API for users they have already checked.',
+      default: "'deny'",
+    },
+  }}
+/>
+
+## Endpoints
+
+| Endpoint | Target | Action | Who (access model) |
+| --- | --- | --- | --- |
+| `set` | room | `better-files:network:manage` | owners, admins |
+| `get` | room | `better-files:network:manage` | owners, admins |
+| `status` | room | `better-files:network:read` | every room relation |
+
+In the browser these are `client.network.<endpoint>(input)`, and over HTTP `POST /api/better-files/network/<endpoint>`.
+
+- **`set`** takes `roomId`, `allowedRanges` (up to 100 entries, each an address or a CIDR range such as
+  `10.0.0.0/8`) and optionally `appliesTo` (`everyone` or `external`; it keeps the previous value, or `everyone` for a
+  new rule). Entries are trimmed and duplicates removed. Any entry that does not parse fails the whole call with
+  `INVALID_INPUT`, listing the bad entries. An empty list removes the restriction. It returns the `NetworkRule`:
+  `id`, `roomId`, `allowedRanges`, `appliesTo`, `updatedBy`, `createdAt`, `updatedAt`.
+- **`get`** takes `{ roomId }` and returns the rule, or `null` when the room has none. It works on closed rooms.
+- **`status`** takes `{ roomId }` and tells the caller whether their own connection may use the room:
+  `{ restricted, allowed, ip }`. Use it to explain an empty room ("connect through the office VPN") instead of
+  showing nothing. It works on closed rooms, and an NDA does not hold it back.
+
+```ts
+const { restricted, allowed, ip } = await client.network.status({ roomId });
+if (restricted && !allowed) showNotice(`Connections from ${ip} cannot open this room.`);
+```
+
+## Who the rule applies to
+
+- `appliesTo: 'external'`: guests only, the principals Better IAM marks as from outside the organization.
+- `appliesTo: 'everyone'`: guests and employees.
+- Owners and administrators of the room (their own relation on the roster) are never restricted.
+
+## Permissions
+
+The rule works in the permission matrix (layer A). Its `clampCapabilities` hook runs after the matrix is resolved and,
+outside the allowed ranges, removes every capability on every folder and document of the room, `LIST` included. Node
+operations then answer `NOT_FOUND`, as for anything the caller cannot list, and download requests are refused. The
+rule only removes; inside the allowed ranges the matrix applies unchanged.
+
+The endpoints are authorized in Better IAM (layer B) on the two actions above. Pass the plugin to
+`betterFilesIamPlugin` so they join the permission catalog. Better IAM's own network conditions in policies still
+apply on top.
+
+## Activity and events
+
+Every `set` writes `network.changed` to the room's activity log and emits the `network.changed` event, both with
+`allowedRanges` and `appliesTo`.
+
+## Address helpers
+
+`parseIp`, `parseIpRange` and `ipInRanges` are exported for hosts that check addresses elsewhere:
+
+```ts
+import { ipInRanges } from 'better-files/plugin-network';
+
+ipInRanges('::ffff:203.0.113.9', ['203.0.113.0/24']); // true
+```
+
+Addresses or ranges that do not parse never match.
+
+## Errors
+
+| Code | When |
+| --- | --- |
+| `INVALID_INPUT` | `set` with an entry that is not an address or range |
+| `FORBIDDEN` | `set` or `get` without room administration |
+| `NOT_FOUND` | a node operation from outside the allowed ranges |
+
+## Limits
+
+- One rule per room, of up to 100 entries. There are no tenant-wide rules in this plugin; use Better IAM policies for
+  those.
+- The rule removes capabilities on folders and documents. It adds no check of its own on room-level operations, so
+  room features of other plugins that do not look at node capabilities are not covered by it.
+- [Share link](/docs/plugins/links) visitors are not checked against the rule.
+
+## Related
+
+- [NDA gating](/docs/plugins/nda)
+- [Download guard](/docs/plugins/guard)
+- [Better IAM integration](/docs/guides/better-iam)

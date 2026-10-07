@@ -1,0 +1,385 @@
+{
+  "name": "better-files",
+  "version": "0.1.0",
+  "description": "Embeddable data rooms for TypeScript apps on Better IAM: rooms, folders, permission matrices, guests, secure viewing and audit, mounted into Next.js, NestJS, Express and more.",
+  "type": "module",
+  "license": "Apache-2.0",
+  "author": "Better Files contributors",
+  "homepage": "https://github.com/Better-Files/better-files/tree/main/packages/better-files#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Better-Files/better-files.git",
+    "directory": "packages/better-files"
+  },
+  "bugs": {
+    "url": "https://github.com/Better-Files/better-files/issues"
+  },
+  "keywords": [
+    "data-room",
+    "virtual-data-room",
+    "document-sharing",
+    "secure-file-sharing",
+    "access-control",
+    "better-iam",
+    "typescript"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./adapter-drizzle": {
+      "types": "./dist/adapter-drizzle.d.ts",
+      "import": "./dist/adapter-drizzle.js"
+    },
+    "./adapter-libsql": {
+      "types": "./dist/adapter-libsql.d.ts",
+      "import": "./dist/adapter-libsql.js"
+    },
+    "./adapter-pglite": {
+      "types": "./dist/adapter-pglite.d.ts",
+      "import": "./dist/adapter-pglite.js"
+    },
+    "./adapter-postgres": {
+      "types": "./dist/adapter-postgres.d.ts",
+      "import": "./dist/adapter-postgres.js"
+    },
+    "./adapter-prisma": {
+      "types": "./dist/adapter-prisma.d.ts",
+      "import": "./dist/adapter-prisma.js"
+    },
+    "./adapter-sql": {
+      "types": "./dist/adapter-sql.d.ts",
+      "import": "./dist/adapter-sql.js"
+    },
+    "./adapter-sqlite": {
+      "types": "./dist/adapter-sqlite.d.ts",
+      "import": "./dist/adapter-sqlite.js"
+    },
+    "./cli": {
+      "types": "./dist/cli.d.ts",
+      "import": "./dist/cli.js"
+    },
+    "./client": {
+      "types": "./dist/client.d.ts",
+      "import": "./dist/client.js"
+    },
+    "./core": {
+      "types": "./dist/core.d.ts",
+      "import": "./dist/core.js"
+    },
+    "./core/conformance": {
+      "types": "./dist/core-conformance.d.ts",
+      "import": "./dist/core-conformance.js"
+    },
+    "./crypto": {
+      "types": "./dist/crypto.d.ts",
+      "import": "./dist/crypto.js"
+    },
+    "./iam": {
+      "types": "./dist/iam.d.ts",
+      "import": "./dist/iam.js"
+    },
+    "./jobs": {
+      "types": "./dist/jobs.d.ts",
+      "import": "./dist/jobs.js"
+    },
+    "./kms": {
+      "types": "./dist/kms.d.ts",
+      "import": "./dist/kms.js"
+    },
+    "./mcp": {
+      "types": "./dist/mcp.d.ts",
+      "import": "./dist/mcp.js"
+    },
+    "./middleware": {
+      "types": "./dist/middleware.d.ts",
+      "import": "./dist/middleware.js"
+    },
+    "./middleware/express": {
+      "types": "./dist/middleware-express.d.ts",
+      "import": "./dist/middleware-express.js"
+    },
+    "./middleware/hono": {
+      "types": "./dist/middleware-hono.d.ts",
+      "import": "./dist/middleware-hono.js"
+    },
+    "./middleware/fastify": {
+      "types": "./dist/middleware-fastify.d.ts",
+      "import": "./dist/middleware-fastify.js"
+    },
+    "./middleware/h3": {
+      "types": "./dist/middleware-h3.d.ts",
+      "import": "./dist/middleware-h3.js"
+    },
+    "./middleware/koa": {
+      "types": "./dist/middleware-koa.d.ts",
+      "import": "./dist/middleware-koa.js"
+    },
+    "./middleware/react-router": {
+      "types": "./dist/middleware-react-router.d.ts",
+      "import": "./dist/middleware-react-router.js"
+    },
+    "./nestjs": {
+      "types": "./dist/nestjs.d.ts",
+      "import": "./dist/nestjs.js"
+    },
+    "./next": {
+      "types": "./dist/next.d.ts",
+      "import": "./dist/next.js"
+    },
+    "./plugin-ai": {
+      "types": "./dist/plugin-ai.d.ts",
+      "import": "./dist/plugin-ai.js"
+    },
+    "./plugin-analytics": {
+      "types": "./dist/plugin-analytics.d.ts",
+      "import": "./dist/plugin-analytics.js"
+    },
+    "./plugin-annotations": {
+      "types": "./dist/plugin-annotations.d.ts",
+      "import": "./dist/plugin-annotations.js"
+    },
+    "./plugin-audit": {
+      "types": "./dist/plugin-audit.d.ts",
+      "import": "./dist/plugin-audit.js"
+    },
+    "./plugin-connectors": {
+      "types": "./dist/plugin-connectors.d.ts",
+      "import": "./dist/plugin-connectors.js"
+    },
+    "./plugin-esign": {
+      "types": "./dist/plugin-esign.d.ts",
+      "import": "./dist/plugin-esign.js"
+    },
+    "./plugin-guard": {
+      "types": "./dist/plugin-guard.d.ts",
+      "import": "./dist/plugin-guard.js"
+    },
+    "./plugin-inbound": {
+      "types": "./dist/plugin-inbound.d.ts",
+      "import": "./dist/plugin-inbound.js"
+    },
+    "./plugin-links": {
+      "types": "./dist/plugin-links.d.ts",
+      "import": "./dist/plugin-links.js"
+    },
+    "./plugin-nda": {
+      "types": "./dist/plugin-nda.d.ts",
+      "import": "./dist/plugin-nda.js"
+    },
+    "./plugin-network": {
+      "types": "./dist/plugin-network.d.ts",
+      "import": "./dist/plugin-network.js"
+    },
+    "./plugin-notifications": {
+      "types": "./dist/plugin-notifications.d.ts",
+      "import": "./dist/plugin-notifications.js"
+    },
+    "./plugin-processing": {
+      "types": "./dist/plugin-processing.d.ts",
+      "import": "./dist/plugin-processing.js"
+    },
+    "./plugin-qa": {
+      "types": "./dist/plugin-qa.d.ts",
+      "import": "./dist/plugin-qa.js"
+    },
+    "./plugin-quotas": {
+      "types": "./dist/plugin-quotas.d.ts",
+      "import": "./dist/plugin-quotas.js"
+    },
+    "./plugin-redaction": {
+      "types": "./dist/plugin-redaction.d.ts",
+      "import": "./dist/plugin-redaction.js"
+    },
+    "./plugin-retention": {
+      "types": "./dist/plugin-retention.d.ts",
+      "import": "./dist/plugin-retention.js"
+    },
+    "./plugin-reviews": {
+      "types": "./dist/plugin-reviews.d.ts",
+      "import": "./dist/plugin-reviews.js"
+    },
+    "./plugin-scan": {
+      "types": "./dist/plugin-scan.d.ts",
+      "import": "./dist/plugin-scan.js"
+    },
+    "./plugin-search": {
+      "types": "./dist/plugin-search.d.ts",
+      "import": "./dist/plugin-search.js"
+    },
+    "./plugin-sync": {
+      "types": "./dist/plugin-sync.d.ts",
+      "import": "./dist/plugin-sync.js"
+    },
+    "./plugin-tasks": {
+      "types": "./dist/plugin-tasks.d.ts",
+      "import": "./dist/plugin-tasks.js"
+    },
+    "./plugin-templates": {
+      "types": "./dist/plugin-templates.d.ts",
+      "import": "./dist/plugin-templates.js"
+    },
+    "./plugin-watermark": {
+      "types": "./dist/plugin-watermark.d.ts",
+      "import": "./dist/plugin-watermark.js"
+    },
+    "./plugin-webhooks": {
+      "types": "./dist/plugin-webhooks.d.ts",
+      "import": "./dist/plugin-webhooks.js"
+    },
+    "./react": {
+      "types": "./dist/react.d.ts",
+      "import": "./dist/react.js"
+    },
+    "./server": {
+      "types": "./dist/server.d.ts",
+      "import": "./dist/server.js"
+    },
+    "./storage-azure": {
+      "types": "./dist/storage-azure.d.ts",
+      "import": "./dist/storage-azure.js"
+    },
+    "./storage-cluster": {
+      "types": "./dist/storage-cluster.d.ts",
+      "import": "./dist/storage-cluster.js"
+    },
+    "./storage-cluster/protocol": {
+      "types": "./dist/storage-cluster-protocol.d.ts",
+      "import": "./dist/storage-cluster-protocol.js"
+    },
+    "./storage-fs": {
+      "types": "./dist/storage-fs.d.ts",
+      "import": "./dist/storage-fs.js"
+    },
+    "./storage-gcs": {
+      "types": "./dist/storage-gcs.d.ts",
+      "import": "./dist/storage-gcs.js"
+    },
+    "./storage-node": {
+      "types": "./dist/storage-node.d.ts",
+      "import": "./dist/storage-node.js"
+    },
+    "./storage-regional": {
+      "types": "./dist/storage-regional.d.ts",
+      "import": "./dist/storage-regional.js"
+    },
+    "./storage-s3": {
+      "types": "./dist/storage-s3.d.ts",
+      "import": "./dist/storage-s3.js"
+    },
+    "./svelte": {
+      "types": "./dist/svelte.d.ts",
+      "import": "./dist/svelte.js"
+    },
+    "./svelte/kit": {
+      "types": "./dist/svelte-kit.d.ts",
+      "import": "./dist/svelte-kit.js"
+    },
+    "./testing": {
+      "types": "./dist/testing.d.ts",
+      "import": "./dist/testing.js"
+    },
+    "./viewer": {
+      "types": "./dist/viewer.d.ts",
+      "import": "./dist/viewer.js"
+    },
+    "./viewer/server": {
+      "types": "./dist/viewer-server.d.ts",
+      "import": "./dist/viewer-server.js"
+    },
+    "./vue": {
+      "types": "./dist/vue.d.ts",
+      "import": "./dist/vue.js"
+    }
+  },
+  "sideEffects": false,
+  "scripts": {
+    "build": "tsc -b"
+  },
+  "dependencies": {
+    "@better-files/adapter-drizzle": "workspace:*",
+    "@better-files/adapter-libsql": "workspace:*",
+    "@better-files/adapter-pglite": "workspace:*",
+    "@better-files/adapter-postgres": "workspace:*",
+    "@better-files/adapter-prisma": "workspace:*",
+    "@better-files/adapter-sql": "workspace:*",
+    "@better-files/adapter-sqlite": "workspace:*",
+    "@better-files/cli": "workspace:*",
+    "@better-files/client": "workspace:*",
+    "@better-files/core": "workspace:*",
+    "@better-files/crypto": "workspace:*",
+    "@better-files/iam": "workspace:*",
+    "@better-files/jobs": "workspace:*",
+    "@better-files/kms": "workspace:*",
+    "@better-files/mcp": "workspace:*",
+    "@better-files/middleware": "workspace:*",
+    "@better-files/nestjs": "workspace:*",
+    "@better-files/next": "workspace:*",
+    "@better-files/plugin-ai": "workspace:*",
+    "@better-files/plugin-analytics": "workspace:*",
+    "@better-files/plugin-annotations": "workspace:*",
+    "@better-files/plugin-audit": "workspace:*",
+    "@better-files/plugin-connectors": "workspace:*",
+    "@better-files/plugin-esign": "workspace:*",
+    "@better-files/plugin-guard": "workspace:*",
+    "@better-files/plugin-inbound": "workspace:*",
+    "@better-files/plugin-links": "workspace:*",
+    "@better-files/plugin-nda": "workspace:*",
+    "@better-files/plugin-network": "workspace:*",
+    "@better-files/plugin-notifications": "workspace:*",
+    "@better-files/plugin-processing": "workspace:*",
+    "@better-files/plugin-qa": "workspace:*",
+    "@better-files/plugin-quotas": "workspace:*",
+    "@better-files/plugin-redaction": "workspace:*",
+    "@better-files/plugin-retention": "workspace:*",
+    "@better-files/plugin-reviews": "workspace:*",
+    "@better-files/plugin-scan": "workspace:*",
+    "@better-files/plugin-search": "workspace:*",
+    "@better-files/plugin-sync": "workspace:*",
+    "@better-files/plugin-tasks": "workspace:*",
+    "@better-files/plugin-templates": "workspace:*",
+    "@better-files/plugin-watermark": "workspace:*",
+    "@better-files/plugin-webhooks": "workspace:*",
+    "@better-files/react": "workspace:*",
+    "@better-files/server": "workspace:*",
+    "@better-files/storage-azure": "workspace:*",
+    "@better-files/storage-cluster": "workspace:*",
+    "@better-files/storage-fs": "workspace:*",
+    "@better-files/storage-gcs": "workspace:*",
+    "@better-files/storage-node": "workspace:*",
+    "@better-files/storage-regional": "workspace:*",
+    "@better-files/storage-s3": "workspace:*",
+    "@better-files/svelte": "workspace:*",
+    "@better-files/testing": "workspace:*",
+    "@better-files/viewer": "workspace:*",
+    "@better-files/vue": "workspace:*"
+  },
+  "peerDependencies": {
+    "better-iam": ">=0.2.0 <0.3.0"
+  },
+  "peerDependenciesMeta": {
+    "better-iam": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "better-iam": "^0.2.0"
+  },
+  "bin": {
+    "better-files": "./dist/bin.js"
+  }
+}

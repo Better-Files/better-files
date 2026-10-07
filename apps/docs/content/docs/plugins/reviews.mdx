@@ -1,0 +1,242 @@
+---
+title: Access reviews
+description: Periodic reviews of who can still enter each room, with recommendations, decisions by someone else, and revocation on completion.
+metaTitle: Access reviews for data rooms
+icon: ClipboardCheck
+packages: ['@better-files/plugin-reviews']
+sources:
+  - packages/plugin-reviews/src/index.ts
+  - packages/plugin-reviews/README.md
+  - packages/server/src/pipeline.ts
+  - packages/server/src/index.ts
+  - tests/plugins/reviews.test.ts
+---
+
+Deal rooms collect people. Bidders drop out, advisers change firms, an invitation sent in March was never accepted.
+Auditors and security teams ask for regular proof that someone looked at each room's list of participants and
+removed the people who should no longer be there. That proof is an **access review**, also called a certification
+campaign.
+
+The reviews plugin runs them. Starting a review takes a snapshot of the room's participants, with their role, groups,
+last activity and a recommendation to keep or revoke. Reviewers decide on each person, but never on themselves.
+Completing the review removes the revoked people from the room and from Better IAM's groups and relationships, and
+records it all in the room's activity log.
+
+```ts
+import { betterFiles } from 'better-files';
+import { betterFilesIamPlugin } from 'better-files/iam';
+import { reviewsPlugin } from 'better-files/plugin-reviews';
+
+const plugins = [reviewsPlugin({ schedule: { everyDays: 90, dueInDays: 14 }, inactiveDays: 60 })] as const;
+const iamPlugin = betterFilesIamPlugin({ plugins }); // registers better-files:reviews:read and :manage
+
+export const dr = betterFiles({ /* iam, database, storage, secret */ plugins });
+
+const { review, items } = await dr.api.reviews.start(credential, { tenantId, roomId, name: 'Q3 review' });
+await dr.api.reviews.acceptRecommendations(credential, { tenantId, reviewId: review.id });
+// ...a second administrator decides on the first one's own entry...
+const { summary } = await dr.api.reviews.complete(credential, { tenantId, reviewId: review.id });
+// { kept: 3, revoked: 1, gone: 0, failed: 0, flagged: 0 }
+```
+
+The plugin owns two tables, `accessReviews` and `accessReviewItems`. On a SQL database, run `better-files generate`
+and `better-files migrate` after adding it.
+
+## Options
+
+<TypeTable
+  type={{
+    inactiveDays: {
+      type: 'number',
+      description: 'People with no activity in the room for this many days are recommended for revocation. A review can override it.',
+      default: '90',
+    },
+    schedule: {
+      type: "{ everyDays: number; dueInDays?: number; scope?: 'all' | 'guests' | 'inactive' }",
+      description: 'Start reviews from dr.maintain() (see Scheduled reviews). everyDays must be at least 1.',
+      default: 'off',
+    },
+    iamAccess: {
+      type: 'IamAccessLookup',
+      description: 'Also list people Better IAM lets into the room who are not on its roster. betterIamAccess(iam, options) builds one.',
+    },
+  }}
+/>
+
+## Start a review
+
+`reviews.start` takes:
+
+<TypeTable
+  type={{
+    roomId: { type: 'string', description: 'The room to review.', required: true },
+    name: {
+      type: 'string',
+      description: '1 to 200 characters.',
+      default: "'Access review YYYY-MM-DD'",
+    },
+    scope: {
+      type: "'all' | 'guests' | 'inactive'",
+      description: 'Who is reviewed: everyone, only guests (people from outside the organization), or only people recommended for revocation.',
+      default: "'all'",
+    },
+    inactiveDays: {
+      type: 'number',
+      description: 'The inactivity window for this review, 1 to 3650 days.',
+      default: 'the plugin option',
+    },
+    dueAt: {
+      type: 'number',
+      description: 'When the review is due, in epoch milliseconds. Must be in the future.',
+    },
+    revokeUndecided: {
+      type: 'boolean',
+      description: 'On completion, also remove everyone nobody decided on.',
+      default: 'false',
+    },
+  }}
+/>
+
+A room has at most one open review; starting a second answers `CONFLICT`. The review covers roster entries that are
+`active`, `invited` or `suspended`. It returns `{ review, items, progress }`, where `progress` counts `total`,
+`pending`, `keep` and `revoke`.
+
+Each item is one person, as they were when the review started: `memberId`, `identityId`, `email`, `memberStatus`,
+`relation` (their room role), `groupIds`, `guest`, `expiresAt`, `lastActivityAt`, `recentActivity` (their number of
+activity records in the window), and the `recommendation` with its `reason`:
+
+| Reason | Recommendation | When |
+| --- | --- | --- |
+| `owner` | keep | The person owns the room. Owners are never recommended for removal. |
+| `invitation-pending` | revoke | Invited before the window started and never accepted. |
+| `expired` | revoke | Their access window (`expiresAt`) has ended. |
+| `inactive` | revoke | No activity in the room's log, and not seen, within the window. |
+| `active` | keep | Everyone else. |
+| `outside-roster` | revoke if no recent activity | Not on the roster; found through `iamAccess` (see below). |
+
+## Decide
+
+- `reviews.decide({ reviewId, decisions })` records up to 500 decisions at once. Each is
+  `{ itemId, decision: 'keep' | 'revoke' | 'pending', note? }`; `pending` clears an earlier decision. Decisions can
+  change until the review completes.
+- `reviews.acceptRecommendations({ reviewId })` takes the recommendation for every undecided person and notes it as
+  `Recommended: <reason>`. It returns `{ decided, progress }`.
+
+Nobody decides on their own access. `decide` refuses an entry for the caller with `FORBIDDEN`
+(`Someone else must review your own access`), and `acceptRecommendations` skips it. In practice a room needs a second
+owner or administrator to finish a review that includes the first one.
+
+## Complete or cancel
+
+`reviews.complete({ reviewId })` acts on every item:
+
+| Outcome | When |
+| --- | --- |
+| `kept` | The decision is keep. |
+| `revoked` | The decision is revoke, and the person was removed with `members.remove`, which also takes them out of Better IAM's groups and relationships. |
+| `gone` | The decision is revoke, but the person had already left the room. |
+| `failed` | `members.remove` refused; the item keeps the `error`. |
+| `flagged` | The decision is revoke for someone not on the roster; only a change in Better IAM can remove that access. |
+
+Without `revokeUndecided`, completing with anyone undecided answers `CONFLICT` (`2 people are still undecided`).
+With it, undecided people are treated as revoke and noted `Undecided at completion`.
+
+<Callout type="warn" title="revokeUndecided includes the caller">
+  The self-review rule stops people from deciding on their own entry, but `revokeUndecided` does not skip it. If the
+  person completing the review is in it and undecided, completion tries to remove them too.
+</Callout>
+
+Each removal runs as the caller, with the caller's permissions, so it can fail for one person while the others go
+through. Completion returns `{ reviewId, summary, flagged }`, stores `summary` on the review, and sets each item's
+`outcome`.
+
+`reviews.cancel({ reviewId, reason? })` closes an open review without changing anyone's access.
+
+`reviews.list({ roomId, status? })` lists a room's reviews, newest first. `reviews.get({ reviewId })` returns
+`{ review, items, progress }`. Both work in closed and archived rooms; the other endpoints change the room and are
+refused there with `ROOM_CLOSED`.
+
+All endpoints are in the `reviews` group: `dr.api.reviews.<name>(credential, input)` on the server and
+`client.reviews.<name>(input)` on the [typed client](/docs/frameworks/client). Every input also takes `tenantId`.
+
+## Access from outside the roster
+
+People can reach a room through Better IAM without being on its roster: tenant administrators, broad policies, groups
+bound outside Better Files. With `iamAccess`, reviews list them too, with `source: 'iam'`,
+`memberStatus: 'not-a-member'`, `reason: 'outside-roster'`, and Better IAM's explanation in `access`. Reviews scoped
+to `guests` skip them.
+
+`betterIamAccess(iam, options)` builds the lookup from Better IAM's `policies.whoCan`, which every 0.2.x release has:
+
+```ts
+import { betterIamAccess, reviewsPlugin } from 'better-files/plugin-reviews';
+
+reviewsPlugin({
+  iamAccess: betterIamAccess(iam, {
+    credential: (tenantId) => serviceAccountFor(tenantId), // needs iam:policies:simulate
+    actions: ['better-files:rooms:read'], // the default: who may open the room
+  }),
+});
+```
+
+The credential needs `iam:policies:simulate` in the tenant; the Better Files service account is the usual choice. It
+looks up at most 1,000 people per action. A room cannot remove such access itself, so a revoke decision ends as
+`flagged`: completion returns those people in `flagged` and publishes `review.iam-access-flagged`, for you to change
+the policy or binding in Better IAM.
+
+## Scheduled reviews
+
+With `schedule`, each `dr.maintain()` run starts a review of every `live` room whose most recent review started more
+than `everyDays` ago, or that has never had one. A room with an open review is skipped. Scheduled reviews are named
+`Scheduled review YYYY-MM-DD`, have `origin: 'schedule'` and `startedBy: 'system'`, use the plugin's `inactiveDays`
+and `schedule.scope`, are due `dueInDays` later when set, and never revoke undecided people. A failure for one room is
+logged and the others go on.
+
+Every run, with or without `schedule`, also publishes `review.overdue` once for each open review past its `dueAt`.
+
+## Permissions
+
+| Action | Granted to | Allows |
+| --- | --- | --- |
+| `better-files:reviews:manage` | room `owner`, `admin` | `start`, `decide`, `acceptRecommendations`, `complete`, `cancel` |
+| `better-files:reviews:read` | room `owner`, `admin`, `auditor` | `list`, `get` |
+
+Pass the plugin to `betterFilesIamPlugin({ plugins })` so Better IAM knows both actions. Other room members get
+`FORBIDDEN`. Completing a review also needs the right to remove members, because each removal is checked as the
+caller.
+
+## Events and activity
+
+| Name | Activity log | Event | Data |
+| --- | --- | --- | --- |
+| `review.started` | manual starts | yes | `reviewId`, `name`, `people`, `origin` |
+| `review.completed` | yes | yes | `reviewId` and the summary counts |
+| `review.cancelled` | yes | no | `reviewId`, `reason` |
+| `review.iam-access-flagged` | no | yes | `reviewId`, `identities` (`identityId`, `email`, `access`) |
+| `review.overdue` | no | yes | `reviewId`, `name`, `dueAt`, `pending` |
+
+Each removal also records the usual `member.removed`.
+
+## Errors
+
+| Code | When |
+| --- | --- |
+| `CONFLICT` (409) | The room already has an open review; the review is not open; people are still undecided at completion. |
+| `FORBIDDEN` (403) | The caller lacks the action, or decides on their own entry. |
+| `NOT_FOUND` (404) | The review or a review item does not exist. |
+| `INVALID_INPUT` (400) | `dueAt` is not in the future, or the input is malformed. |
+| `ROOM_CLOSED` (409) | A changing endpoint on a closed or archived room. |
+| `INVALID_CONFIG` | `schedule.everyDays` below 1, thrown by `reviewsPlugin()`. |
+
+## Limits
+
+- A review is a snapshot: people added after it started are not in it.
+- Last activity comes from the room's activity log and the member's `lastSeenAt`.
+- The schedule looks at up to 1,000 live rooms per `dr.maintain()` run.
+
+## Related
+
+- [Legal holds and retention](/docs/plugins/retention)
+- [Audit](/docs/plugins/audit)
+- [Better IAM](/docs/guides/better-iam)
+- [Error codes](/docs/reference/errors)

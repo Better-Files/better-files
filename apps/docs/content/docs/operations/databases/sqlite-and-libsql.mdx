@@ -1,0 +1,125 @@
+---
+title: SQLite and libSQL
+description: Store the Better Files tables in a SQLite file through better-sqlite3, or in libSQL locally, on Turso or on sqld.
+metaTitle: SQLite and libSQL adapters
+icon: Database
+packages: ['@better-files/adapter-sqlite', '@better-files/adapter-libsql']
+sources:
+  - packages/adapter-sqlite/src/index.ts
+  - packages/adapter-sqlite/README.md
+  - packages/adapter-libsql/src/index.ts
+  - packages/adapter-libsql/README.md
+  - packages/adapter-sql/src/index.ts
+  - packages/adapter-sql/src/ddl.ts
+  - packages/cli/src/cli.ts
+  - tests/conformance/sql-databases.test.ts
+---
+
+SQLite needs no database server: the whole database is one file next to your app. That suits single-server
+deployments, development and tests. libSQL, the SQLite fork behind Turso, keeps the same SQL and adds hosted and
+replicated databases. Better Files has an adapter for each.
+
+```ts
+import { sqliteAdapter } from 'better-files/adapter-sqlite';
+
+export const dr = betterFiles({
+  database: sqliteAdapter({ filename: './data/app.db' }), // the same file as Better IAM, or another one
+  // iam, storage, secret, plugins
+});
+
+await dr.initialize();
+```
+
+## SQLite
+
+`sqliteAdapter` uses [better-sqlite3](https://github.com/WiseLibs/better-sqlite3), a native module, so your package
+manager must be allowed to build it.
+
+<TypeTable
+  type={{
+    filename: {
+      type: 'string',
+      description: "A file path, or ':memory:' for a database that lives only as long as the process.",
+      required: true,
+    },
+    busyTimeoutMs: {
+      type: 'number',
+      description: 'Milliseconds to wait for a lock held by another connection or process.',
+      default: '5000',
+    },
+    journalMode: {
+      type: "'wal' | 'delete' | 'truncate' | 'persist' | 'memory' | 'off'",
+      description: 'The journal mode for a file. WAL lets readers run while a write is in progress. Not set for :memory:.',
+      default: "'wal'",
+    },
+  }}
+/>
+
+The adapter also turns on `foreign_keys`. It opens its own connection to the file, and `dr.close()` closes that
+connection. Sharing Better IAM's file is fine: the tables are prefixed (`better_files_` by default), and WAL mode plus
+the busy timeout let the two connections take turns writing.
+
+How it behaves:
+
+- **One writer.** SQLite allows one write transaction at a time. Each Better Files transaction starts with
+  `BEGIN IMMEDIATE`, which takes the write lock at once, and transactions in one process are queued, so two never
+  interleave on the connection. Reads outside a transaction do not wait for the queue. Another process holding the
+  lock makes a transaction wait up to `busyTimeoutMs`, then fail.
+- **Prepared statements are cached.** The adapter keeps the 256 most recently used statements, since it builds the
+  same few over and over.
+- **Types.** Numbers and timestamps are `REAL` (timestamps in epoch milliseconds), booleans `INTEGER` 0 or 1, and
+  JSON fields `TEXT`.
+- **Unique violations** (`SQLITE_CONSTRAINT_UNIQUE`, `SQLITE_CONSTRAINT_PRIMARYKEY`) are reported as `CONFLICT`.
+
+`sqliteDriver(db)` returns the raw `SqlDriver` over a better-sqlite3 `Database` you opened yourself, for
+[`createSqlAdapter`](/docs/operations/databases#the-shared-sql-layer) or custom migrations. The
+[Drizzle adapter](/docs/operations/databases/prisma-and-drizzle) uses it for better-sqlite3.
+
+## libSQL and Turso
+
+`libsqlAdapter` runs on [`@libsql/client`](https://github.com/tursodatabase/libsql-client-ts): a local file, a Turso
+database, or a `sqld` server.
+
+```ts
+import { libsqlAdapter } from 'better-files/adapter-libsql';
+
+const database = libsqlAdapter({
+  url: process.env.TURSO_DATABASE_URL!, // libsql://…
+  authToken: process.env.TURSO_AUTH_TOKEN,
+});
+```
+
+<TypeTable
+  type={{
+    url: {
+      type: 'string',
+      description: 'file:local.db, libsql://… (Turso) or http://… (sqld). Ignored when you pass a client.',
+      default: "'file::memory:'",
+    },
+    authToken: { type: 'string', description: 'The token for a remote database.' },
+    client: { type: 'Client', description: 'An existing @libsql/client client, shared with the rest of the app.' },
+  }}
+/>
+
+How it behaves:
+
+- Transactions are libSQL `write` transactions. Transactions from one adapter are queued so they never overlap;
+  statements outside a transaction do not wait.
+- libSQL opens a new connection for each transaction, so an in-memory database is not shared between them. Use a file
+  (`file:./dev.db`), even in tests, rather than the default `file::memory:`.
+- `dr.close()` closes the client, including a client you passed in.
+- Types and unique-violation handling are the same as SQLite's: libSQL errors with `SQLITE_CONSTRAINT` and `UNIQUE`
+  or `PRIMARY` are reported as `CONFLICT`.
+
+## Limits
+
+- Partitioned tables need PostgreSQL: these adapters take no `partitions` option.
+- Write transactions run one at a time, per adapter in the process and per file across processes. A write-heavy
+  deployment with several app servers is better served by [PostgreSQL](/docs/operations/databases/postgres).
+- `better-files generate` picks the `sqlite` dialect by itself for these adapters.
+
+## Related
+
+- [Databases](/docs/operations/databases)
+- [PGlite](/docs/operations/databases/pglite): PostgreSQL semantics with no server.
+- [Prisma and Drizzle](/docs/operations/databases/prisma-and-drizzle): Drizzle over better-sqlite3 or libSQL.

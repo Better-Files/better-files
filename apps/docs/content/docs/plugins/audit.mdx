@@ -1,0 +1,169 @@
+---
+title: Audit reports
+description: One report per room of who is in it, what each group may do on each folder, who viewed and took what, and whether the activity log is intact.
+metaTitle: Audit reports for data rooms
+icon: ClipboardCheck
+packages: ['@better-files/plugin-audit']
+sources:
+  - packages/plugin-audit/src/index.ts
+  - packages/plugin-audit/README.md
+  - packages/plugin-audit/package.json
+  - packages/core/src/operations.ts
+  - packages/server/src/access.ts
+  - tests/plugins/audit.test.ts
+---
+
+When a deal closes, or a regulator or an internal review asks, someone has to show who had access to the room, what
+they could do, and what they actually looked at and downloaded. Assembling that by hand from screens and logs takes
+days and is hard to defend.
+
+The audit plugin builds that record in one call: the room, its groups and participants, a permission matrix of
+groups by folder, engagement per person, and a fresh check of the activity log's hash chain. It returns JSON or a
+PDF with its SHA-256 hash, and can file the report into the room as a document for the closing binder.
+
+```ts
+import { betterFiles } from 'better-files';
+import { auditPlugin } from 'better-files/plugin-audit';
+
+export const dr = betterFiles({ /* iam, database, storage, secret */ plugins: [auditPlugin()] });
+
+const { report, sha256 } = await dr.api.audit.report(credential, { tenantId, roomId }); // JSON
+const pdf = await dr.api.audit.report(credential, {
+  tenantId,
+  roomId,
+  format: 'pdf',
+  saveTo: closingFolderId, // also file it into this folder of the room
+});
+```
+
+`auditPlugin()` takes no options and adds no tables. It uses the core action `better-files:activity:export`, so it
+adds nothing to Better IAM's catalog either. PDFs need `pdf-lib`, an optional peer dependency; without it a PDF
+request fails with `UNSUPPORTED`.
+
+## Who can run a report
+
+`audit.report` is authorized as `better-files:activity:export` on the room. The core access model grants it to the
+room's `owner`, `admin` and `auditor` relations. Buyers, viewers and other participants get `FORBIDDEN`. It also
+works on closed rooms.
+
+The report is not filtered by the caller's own view of the room. It covers every folder, every group and every
+participant, including folders hidden from most people, because that is what an access review needs. Give the
+`auditor` relation only to people who may see the room's whole structure and roster. (Auditors already get `LIST`
+and `VIEW` on everything in the room.)
+
+## Input
+
+<TypeTable
+  type={{
+    roomId: { type: 'string', description: 'The room.', required: true },
+    format: { type: "'json' | 'pdf'", description: 'The report format.', default: "'json'" },
+    depth: {
+      type: 'number',
+      description: 'Folder levels in the access matrix, 0 to 10. 0 is the room root only.',
+      default: '2',
+    },
+    saveTo: {
+      type: 'string',
+      description: 'A folder of the room to file the report into, as a new document. The caller needs UPLOAD on it.',
+    },
+  }}
+/>
+
+## Result
+
+<TypeTable
+  type={{
+    filename: {
+      type: 'string',
+      description: "'Audit report <room name> <YYYY-MM-DD>.json' or '.pdf'. Characters not allowed in file names are replaced with _.",
+    },
+    mimeType: { type: 'string', description: 'application/json or application/pdf.' },
+    sha256: { type: 'string', description: 'The SHA-256 hash of the file, in hex.' },
+    size: { type: 'number', description: 'The file size in bytes.' },
+    report: { type: 'AuditReport', description: 'The report itself, for format json.' },
+    content: { type: 'string', description: 'The PDF, base64-encoded, for format pdf.' },
+    nodeId: { type: 'string', description: 'The filed document, when saveTo was given.' },
+  }}
+/>
+
+With `saveTo`, the report is added to the folder as a document whose version comment is `sha256 <hash>`, so the hash
+stays with the file.
+
+## What a report contains
+
+<TypeTable
+  type={{
+    room: {
+      type: '{ id, name, status, createdAt, documents, folders }',
+      description: 'The room, with counts of live documents and folders (the root not counted).',
+    },
+    generatedAt: { type: 'string', description: 'When the report was built, as an ISO 8601 date.' },
+    generatedBy: { type: 'string', description: "The caller's email, or their id when there is none." },
+    chain: {
+      type: '{ valid: boolean, ... }',
+      description: "The activity log's hash chain, recomputed now. valid is false when the stored chain does not verify.",
+    },
+    groups: {
+      type: '{ name, kind, relation, members }[]',
+      description: "The room's permission groups, with their room relation and current member count.",
+    },
+    participants: {
+      type: '{ identityId, email, status, relation, groups, guest, lastSeenAt }[]',
+      description: 'Every member not removed: their relation, group names, whether they are a guest, and when they were last seen.',
+    },
+    access: {
+      type: '{ path, groups: Record<string, string[]> }[]',
+      description: 'For each folder down to depth, the capabilities each group holds there, by group name.',
+    },
+    engagement: {
+      type: '{ identityId, email, views, downloads, uploads, other, lastActivityAt }[]',
+      description: 'Per person, from the whole activity log, most views and downloads first.',
+    },
+  }}
+/>
+
+A few details:
+
+- **Access** lists capability names such as `VIEW` and `DOWNLOAD_WATERMARKED`, resolved from the permission matrix
+  over the folder tree, with inheritance and locked entries. An empty list means no access. It is the matrix before
+  room settings (downloads switched off, an NDA still pending) and plugin limits are applied, and it shows group
+  entries only, not entries for individual people or share links.
+- **Engagement** counts `document.viewed` as views; `document.downloaded` and `folder.downloaded` as downloads;
+  `document.uploaded` and `version.created` as uploads; and every other activity entry as `other`. It includes
+  people who have since been removed from the room.
+- **The chain check** is the same as the room's `activity.verify`. The PDF prints `Activity chain: intact` or
+  `BROKEN`.
+
+## The PDF
+
+The PDF is A4, in Helvetica, with sections for the room, groups, participants, access by folder and group, and
+engagement. It needs no fonts installed. The standard fonts cover Western European characters only: other
+characters, such as Cyrillic or Chinese names, are printed as `?`, and lines too long for the page are cut. Use
+the JSON report when names must be exact.
+
+## Activity
+
+Each report records `audit.reported` in the room's activity log, with `format`, `sha256` and `chainValid`, and the
+filed document's `nodeId` when `saveTo` was used. The entry goes to the activity log only; it is not published as an
+event.
+
+## Errors
+
+| Code | When |
+| --- | --- |
+| `FORBIDDEN` | the caller lacks `better-files:activity:export` on the room; `saveTo` names a folder without `UPLOAD` for the caller |
+| `INVALID_INPUT` | `saveTo` is not a folder of this room; `depth` is outside 0 to 10 |
+| `UNSUPPORTED` | `format: 'pdf'` without `pdf-lib` installed |
+
+## Limits
+
+- The report is built within the request and reads the room's whole activity log, 1,000 entries at a time. On a
+  room with a long history, run it from a script or a background job.
+- The PDF is returned inline as base64, which adds a third to its size.
+- One room per report.
+
+## Related
+
+- [Webhooks](/docs/plugins/webhooks): send room events to a compliance system as they happen.
+- [Search](/docs/plugins/search): `search.performed` entries in the activity log.
+- [Better IAM integration](/docs/guides/better-iam)

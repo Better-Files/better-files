@@ -1,0 +1,213 @@
+---
+title: Operations
+description: What a production Better Files deployment needs, from the database and storage to keys, maintenance, jobs and headers.
+metaTitle: Running Better Files in production
+icon: Server
+packages: ['better-files', '@better-files/server', '@better-files/cli']
+sources:
+  - packages/server/src/options.ts
+  - packages/server/src/index.ts
+  - packages/server/src/http.ts
+  - packages/server/src/jobs.ts
+  - packages/cli/src/cli.ts
+  - packages/core/src/ports.ts
+  - README.md
+  - PLAN.md
+---
+
+Better Files is a library: it runs inside your server process, on your database and your storage. There is no
+Better Files service to operate, but there are a few things your deployment must provide and a few calls it must
+make on a schedule. This section covers them.
+
+```ts
+import { betterFiles } from 'better-files';
+import { betterIamIntegration } from 'better-files/iam';
+import { postgresAdapter } from 'better-files/adapter-postgres';
+import { s3Storage } from 'better-files/storage-s3';
+
+export const dr = betterFiles({
+  iam: betterIamIntegration(iam, { iamPlugin, systemCredential }),
+  database: postgresAdapter({ pool }), // share the app's pool
+  storage: s3Storage({ bucket: 'rooms', region: 'eu-west-1', credentials }),
+  secret: process.env.BETTER_FILES_SECRET!, // at least 32 characters, stable across restarts
+  trustedOrigins: ['https://app.example.com'],
+  logger,
+  plugins,
+});
+
+await dr.initialize(); // at deploy time: creates or upgrades the tables
+```
+
+## Production checklist
+
+<Steps>
+<Step>
+
+### A database
+
+`database` takes a database adapter: PostgreSQL, SQLite, libSQL, PGlite, or your own Prisma or Drizzle client. The
+Better Files tables can live in your application's database, under a table prefix (`better_files_` by default). See
+[Databases](/docs/operations/databases).
+
+</Step>
+<Step>
+
+### File storage
+
+`storage` takes a storage adapter: S3-compatible object storage, a local folder, Google Cloud Storage, Azure, a
+per-region router, or a cluster of your own servers' disks. See [Storage](/docs/operations/storage).
+
+</Step>
+<Step>
+
+### Encryption keys
+
+Stored files are encrypted. `encryption` picks the key provider:
+
+- left out, Better Files uses the identity integration's key provider (Better IAM's KMS through
+  `betterIamIntegration`);
+- `{ keys }` takes any provider: `localKeyProvider({ secret })` for development without a KMS, or a cloud KMS;
+- `false` stores files unencrypted, for development only.
+
+When neither the option nor the integration supplies a key provider, `betterFiles()` refuses to start with
+`INVALID_CONFIG`. See [Encryption](/docs/operations/encryption).
+
+</Step>
+<Step>
+
+### A secret
+
+`secret` signs download and viewer tickets. It must be at least 32 characters (`betterFiles()` throws
+`INVALID_CONFIG` otherwise), kept out of source control, and the same on every instance and across restarts: a
+ticket signed by one instance is served by whichever instance gets the request.
+
+</Step>
+<Step>
+
+### Initialize at deploy time
+
+`dr.initialize()` creates missing tables, adds missing columns and indexes, and returns
+`{ applied: [...] }` with the tables it changed. It is idempotent, like `iam.initialize()`. Run it from your deploy
+step, or with the CLI:
+
+```sh
+npx better-files migrate
+```
+
+Run it again after upgrading Better Files or adding a plugin, since plugins bring their own tables. If your own
+migration tool owns the database, generate the tables for it instead with `better-files generate`
+([Prisma and Drizzle](/docs/operations/databases/prisma-and-drizzle)).
+
+</Step>
+<Step>
+
+### Maintain on a schedule
+
+`dr.maintain()` does the periodic work: it deletes expired tickets and upload sessions, purges the trash past each
+room's retention, closes rooms whose `closesAt` has passed, ends members' expired access windows, runs jobs no runner
+picked up, and runs every plugin's `maintain` hook. Schedule it every few minutes, from a cron route, a scheduled job,
+or the CLI:
+
+```sh
+npx better-files maintain --every 300
+```
+
+See [Maintenance and jobs](/docs/operations/maintenance-and-jobs).
+
+</Step>
+<Step>
+
+### A jobs runner
+
+Durable background jobs are stored in the database. `jobs.runner` decides where they run:
+
+| Runner | Behavior |
+| --- | --- |
+| `'inline'` (default) | In this process, right after the enqueueing operation commits, with retries on timers. `jobs.concurrency` caps how many run at once (default 4). |
+| `'deferred'` | Jobs wait in the table until you call `dr.jobs.work()` (or `dr.maintain()`): for serverless hosts and existing workers. |
+| a `JobRunner` | Your queue: `bullmqRunner` or `pgBossRunner` from `better-files/jobs`, or your own. |
+
+On shutdown, call `dr.close()`: it stops the runner, waits for inline jobs in progress, and closes the database
+adapter.
+
+</Step>
+<Step>
+
+### Backups
+
+Back up the database and the storage together: the database holds rooms, versions and the activity log, and storage
+holds the encrypted file bodies they point to. A file body can only be decrypted with its data key, which the key
+provider wrapped, so your key provider's keys are part of what you must be able to restore.
+
+After a restore, `better-files verify --tenant <id> --room <id>` recomputes a room's activity hash chain and exits
+with code 2 when it is broken.
+
+</Step>
+<Step>
+
+### Observability
+
+- `logger` takes an object with `warn` and `error` (and optional `debug` and `info`); it defaults to `console`.
+  Unhandled errors in the HTTP handler, failed scheduled room closes, and failed member expirations are logged
+  through it.
+- `GET {basePath}/health` answers `{ "data": { "ok": true } }` for load balancer checks. `basePath` defaults to
+  `/api/better-files`.
+- A request's `x-request-id` header (letters, digits, `.`, `_` and `-`, up to 128 characters) is echoed on the JSON
+  response, so you can correlate logs.
+- `dr.events.subscribe('document.*', handler)` feeds activity into your own metrics or alerting.
+- `better-files doctor --tenant <id>` checks the secret, the plugins, the database, a storage write and read, and a
+  data key round trip.
+
+</Step>
+<Step>
+
+### Security headers and trusted origins
+
+- Every protocol call must carry the header `x-better-files: 1`; requests without it are refused with `FORBIDDEN`.
+- Cookie-bearing requests must come from the page's own origin or one listed in `trustedOrigins`. Bearer-token
+  requests need no origin.
+- JSON responses carry `cache-control: no-store`, `x-content-type-options: nosniff` and
+  `referrer-policy: no-referrer`.
+- Set `trustProxy: true` only behind a proxy you control: it makes the first `x-forwarded-for` address the client address
+  Better Files records and checks.
+- `maxJsonBodyBytes` caps JSON request bodies (64 KiB by default, the same as Better IAM).
+
+See [Security](/docs/operations/security).
+
+</Step>
+</Steps>
+
+## In this section
+
+<Cards>
+  <Card title="Databases" href="/docs/operations/databases">
+    The database adapter, the shared SQL layer, and which adapter to choose.
+  </Card>
+  <Card title="Storage" href="/docs/operations/storage">
+    Where file bodies live: S3, local disk, cloud buckets, regions, or your own cluster.
+  </Card>
+  <Card title="Encryption" href="/docs/operations/encryption">
+    Key providers, per-room keys, and crypto-shredding.
+  </Card>
+  <Card title="Maintenance and jobs" href="/docs/operations/maintenance-and-jobs">
+    Scheduling `dr.maintain()` and choosing a jobs runner.
+  </Card>
+  <Card title="Deployment" href="/docs/operations/deployment">
+    Serverless, containers, and single-server deployments.
+  </Card>
+  <Card title="Command line" href="/docs/operations/cli">
+    `migrate`, `maintain`, `verify`, `doctor`, `generate`, `openapi` and more.
+  </Card>
+  <Card title="Testing" href="/docs/operations/testing">
+    In-memory adapters, fakes, and conformance suites.
+  </Card>
+  <Card title="Security" href="/docs/operations/security">
+    The threat model and the controls behind it.
+  </Card>
+</Cards>
+
+## Related
+
+- [Installation](/docs/guides/installation)
+- [Better IAM integration](/docs/guides/better-iam)
+- [Database schema](/docs/guides/concepts/schema)

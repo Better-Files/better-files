@@ -1,0 +1,20 @@
+---
+title: Packages
+description: Every Better Files package with its subpath exports, generated from the workspace manifests.
+icon: Package
+---
+
+Most apps install one package, the umbrella `better-files`, and import each part through a subpath such as
+`better-files/plugin-nda` or `better-files/adapter-postgres`. Each part is also published on its own as
+`@better-files/<part>`, for apps that want to depend on exactly what they use. The two are the same code: the umbrella
+subpaths re-export the parts.
+
+```npm
+npm install better-files better-iam
+```
+
+`better-iam` is a peer dependency of the Better IAM integration (`better-files/iam`). Frameworks, native tools and
+SDKs that only some features need (React, Vue, sharp, the Anthropic SDK, …) are optional peers: install them when you
+use the feature that needs them.
+
+<PackageTable />

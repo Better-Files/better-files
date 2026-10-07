@@ -1,0 +1,69 @@
+{
+  "name": "@better-files/plugin-processing",
+  "version": "0.1.0",
+  "description": "Document processing for Better Files: Office to PDF (LibreOffice or your converter) so every format can be viewed and watermarked, plus thumbnails",
+  "type": "module",
+  "license": "Apache-2.0",
+  "author": "Better Files contributors",
+  "homepage": "https://github.com/Better-Files/better-files/tree/main/packages/plugin-processing#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Better-Files/better-files.git",
+    "directory": "packages/plugin-processing"
+  },
+  "bugs": {
+    "url": "https://github.com/Better-Files/better-files/issues"
+  },
+  "keywords": [
+    "data-room",
+    "better-iam",
+    "typescript",
+    "processing",
+    "office",
+    "pdf",
+    "thumbnails",
+    "libreoffice"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "sideEffects": false,
+  "scripts": {
+    "build": "tsc -b"
+  },
+  "dependencies": {
+    "@better-files/core": "workspace:*"
+  },
+  "peerDependencies": {
+    "unpdf": ">=1.0.0",
+    "@napi-rs/canvas": ">=0.1.60"
+  },
+  "peerDependenciesMeta": {
+    "unpdf": {
+      "optional": true
+    },
+    "@napi-rs/canvas": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "unpdf": "^1.8.1",
+    "@napi-rs/canvas": "^1.0.9"
+  }
+}

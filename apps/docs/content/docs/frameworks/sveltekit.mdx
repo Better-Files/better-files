@@ -1,0 +1,88 @@
+---
+title: SvelteKit
+metaTitle: Better Files for SvelteKit
+description: Serve the protocol from a handle hook or a catch-all +server.ts, and call the API as the signed-in person from load functions and form actions.
+icon: Svelte
+packages:
+  - '@better-files/svelte'
+  - '@better-files/middleware'
+sources:
+  - packages/svelte/src/kit.ts
+  - packages/middleware/src/index.ts
+  - docs/guides/frameworks/sveltekit.md
+---
+
+`better-files/svelte/kit` serves the protocol in SvelteKit, from a `handle` hook or a catch-all route. Neither form
+imports SvelteKit. Both pass `event.getClientAddress()` to Better Files as the client address. The
+[Svelte stores](/docs/frameworks/svelte) cover the browser side.
+
+## Mount the protocol
+
+<Tabs items={['handle hook', 'catch-all route']}>
+<Tab value="handle hook">
+
+```ts title="src/hooks.server.ts"
+import { sequence } from '@sveltejs/kit/hooks';
+import { betterFilesHandle } from 'better-files/svelte/kit';
+import { dr } from '$lib/server/better-files';
+
+export const handle = sequence(betterFilesHandle(dr), yourHandle);
+```
+
+The hook answers everything under `basePath` before your routes run, and passes every other request on.
+
+</Tab>
+<Tab value="catch-all route">
+
+```ts title="src/routes/api/better-files/[...path]/+server.ts"
+import { betterFilesHandlers } from 'better-files/svelte/kit';
+import { dr } from '$lib/server/better-files';
+
+export const { GET, HEAD, POST, PUT, OPTIONS } = betterFilesHandlers(dr);
+```
+
+The route folder must match `basePath` on `betterFiles()`, which defaults to `/api/better-files`.
+
+</Tab>
+</Tabs>
+
+## Load functions and form actions
+
+Bind the API to the request's cookies, and check a node before rendering it:
+
+```ts title="src/routes/rooms/[roomId]/docs/[nodeId]/+page.server.ts"
+import { error } from '@sveltejs/kit';
+import { bindApi, requireCapabilities } from 'better-files/middleware';
+import { dr } from '$lib/server/better-files';
+
+export async function load({ request, params, locals }) {
+  const credential = { headers: request.headers };
+  const tenantId = locals.tenantId; // however your app knows the tenant
+  try {
+    const held = await requireCapabilities(dr, credential, {
+      tenantId,
+      roomId: params.roomId,
+      nodeId: params.nodeId,
+      capabilities: ['VIEW'],
+    });
+    const document = await bindApi(dr, credential).documents.get({ tenantId, nodeId: params.nodeId });
+    return { document, canDownload: held.includes('DOWNLOAD_ORIGINAL') };
+  } catch (cause) {
+    const code = (cause as { code?: string }).code;
+    if (code === 'NOT_FOUND') error(404, 'Not found');
+    if (code === 'FORBIDDEN') error(403, 'Forbidden');
+    throw cause;
+  }
+}
+```
+
+- `requireCapabilities` returns every capability the person holds on the node. It throws `NOT_FOUND` for a node they
+  cannot list, and `FORBIDDEN` for one they can see but not use.
+- For many nodes at once, use `dr.capabilitiesFor(credential, { tenantId, roomId, nodeIds })`.
+- Form actions bind the API the same way. Every operation checks both authorization layers itself.
+
+## Initialization and maintenance
+
+Run `await dr.initialize()` at deploy time with `npx better-files migrate`, or once at startup in `hooks.server.ts`
+(SvelteKit's `init` hook). Call `dr.maintain()` from a scheduler, or run `npx better-files maintain --every 300`
+next to the app.

@@ -1,0 +1,188 @@
+---
+title: Prisma and Drizzle
+description: Run the Better Files tables through your PrismaClient or drizzle database, and let prisma migrate or drizzle-kit own them.
+metaTitle: Prisma and Drizzle adapters
+icon: Database
+packages: ['@better-files/adapter-prisma', '@better-files/adapter-drizzle', '@better-files/adapter-sql', '@better-files/cli']
+sources:
+  - packages/adapter-prisma/src/index.ts
+  - packages/adapter-prisma/README.md
+  - packages/adapter-drizzle/src/index.ts
+  - packages/adapter-drizzle/README.md
+  - packages/adapter-drizzle/package.json
+  - packages/adapter-sql/src/generate.ts
+  - packages/adapter-sql/src/index.ts
+  - packages/cli/src/cli.ts
+  - tests/conformance/orm-adapters.test.ts
+---
+
+If your app uses Prisma or Drizzle, that ORM owns two things: the database connection, and the migrations. Tables it
+does not know about look like drift to its migration tool; `prisma migrate` then offers to reset the database. The
+Prisma and Drizzle adapters solve both: Better Files runs its queries through your client, and
+`better-files generate` writes the Better Files tables in your ORM's own schema language, so your migration tool
+creates and keeps them.
+
+<Tabs items={['Prisma', 'Drizzle']} groupId="orm">
+<Tab value="Prisma">
+
+```sh
+npx better-files generate --format prisma --out prisma/better-files.prisma   # add the models to your Prisma schema
+npx prisma migrate dev --name better-files
+```
+
+```ts
+import { PrismaClient } from '@prisma/client';
+import { prismaAdapter } from 'better-files/adapter-prisma';
+
+const prisma = new PrismaClient();
+
+export const dr = betterFiles({
+  database: prismaAdapter({ client: prisma, provider: 'postgresql' }),
+  // iam, storage, secret, plugins
+});
+```
+
+</Tab>
+<Tab value="Drizzle">
+
+```sh
+npx better-files generate --format drizzle --out src/db/better-files-schema.ts
+npx drizzle-kit generate && npx drizzle-kit migrate
+```
+
+```ts
+import { drizzle } from 'drizzle-orm/node-postgres';
+import { drizzleAdapter } from 'better-files/adapter-drizzle';
+
+export const db = drizzle(pool); // a pg Pool
+
+export const dr = betterFiles({
+  database: drizzleAdapter(db),
+  // iam, storage, secret, plugins
+});
+```
+
+</Tab>
+</Tabs>
+
+## Prisma
+
+`prismaAdapter` takes your `PrismaClient`, so Better Files shares its connection pool, including Prisma Accelerate and
+driver adapters.
+
+<TypeTable
+  type={{
+    client: {
+      type: 'PrismaClientLike',
+      description: 'Your PrismaClient. Better Files uses $queryRawUnsafe, $executeRawUnsafe and $transaction.',
+      required: true,
+    },
+    provider: {
+      type: "'postgresql' | 'sqlite'",
+      description: 'The datasource provider in your Prisma schema.',
+      required: true,
+    },
+    transaction: {
+      type: '{ maxWait?: number; timeout?: number }',
+      description: 'Interactive transaction limits in milliseconds: how long to wait for a connection, and how long a transaction may run.',
+      default: '{ maxWait: 5000, timeout: 30000 }',
+    },
+  }}
+/>
+
+How it behaves:
+
+- Queries go through `$queryRawUnsafe` and `$executeRawUnsafe`, with bound parameters and, on PostgreSQL, explicit
+  casts on every placeholder, so Prisma's typed parameters behave like node-postgres's.
+- Transactions are interactive (`$transaction(fn)`). Work nested inside one joins it.
+- `bigint` and `Decimal` results are turned into numbers.
+- Prisma's `P2002`, and errors carrying `23505`, `UNIQUE constraint failed` or `duplicate key value`, are reported
+  as `CONFLICT`.
+- `dr.close()` does not disconnect Prisma: call `prisma.$disconnect()` yourself when your app shuts down.
+- The adapter takes no `partitions` option. For partitioned tables, use
+  [`postgresAdapter`](/docs/operations/databases/postgres#partitioned-tables) on the same database.
+
+The generated models are named after the tables (`BetterFilesRooms` for `better_files_rooms`) and mapped to them with
+`@@map`; numbers and timestamps are `Float`, JSON fields `Json` on PostgreSQL and `String` on SQLite.
+
+## Drizzle
+
+`drizzleAdapter(db)` takes your drizzle database. It looks at the client behind `db.$client` and reuses the matching
+Better Files driver, so behavior is identical to the direct adapters:
+
+| Drizzle over | Runs as |
+| --- | --- |
+| node-postgres `Pool` | the [PostgreSQL](/docs/operations/databases/postgres) driver |
+| postgres.js (common on Supabase, Neon and Vercel) | a postgres.js driver using `unsafe` and `begin` |
+| PGlite | [`pgliteAdapter({ client })`](/docs/operations/databases/pglite) |
+| better-sqlite3 | the [SQLite](/docs/operations/databases/sqlite-and-libsql) driver |
+| libSQL / Turso | [`libsqlAdapter({ client })`](/docs/operations/databases/sqlite-and-libsql#libsql-and-turso) |
+
+- node-postgres needs a `Pool`, not a single `pg` `Client`: each transaction needs its own connection. A `Client`
+  fails with an error saying so.
+- Any other client fails with `drizzleAdapter: unsupported drizzle client`.
+- `dr.close()` does nothing: the host owns the connection and closes it.
+- The adapter takes no `partitions` option.
+- The matching Better Files adapter packages are optional peer dependencies of `@better-files/adapter-drizzle`. The
+  `better-files` umbrella package includes them all.
+
+## Generate the tables for your migration tool
+
+`better-files generate` loads your instance from `better-files.config.ts` (or `--config <file>`) and prints every
+Better Files table, core, plugin tables and your additional fields, in the format you ask for:
+
+```sh
+npx better-files generate --format sql --out migrations/better-files.sql
+npx better-files generate --format prisma --dialect postgres --out prisma/better-files.prisma
+npx better-files generate --format drizzle --dialect sqlite --out src/db/better-files-schema.ts
+```
+
+| Flag | Values | Default |
+| --- | --- | --- |
+| `--format` | `sql`, `prisma`, `drizzle` | `sql` |
+| `--dialect` | `postgres`, `sqlite` | `sqlite` when the database adapter's id contains `sqlite` or `libsql`, otherwise `postgres` |
+| `--out` | a file path | print to stdout |
+
+<Callout type="warn" title="Pass --dialect with Drizzle on SQLite">
+  `drizzleAdapter` reports the id `drizzle` whatever the client behind it, so `generate` assumes PostgreSQL. With
+  Drizzle over better-sqlite3 or libSQL, pass `--dialect sqlite`.
+</Callout>
+
+What each format gives you:
+
+- **`sql`**: `CREATE TABLE IF NOT EXISTS` and `CREATE INDEX IF NOT EXISTS` statements, the same tables
+  `dr.initialize()` creates. Run against an empty database, `initialize()` then has nothing left to create.
+- **`prisma`**: one `model` per table, with `@id`, `@map` for column names, `@@unique` and `@@index` with the index
+  names Better Files uses, and `@@map` to the table name. Add them to your Prisma schema (or a file in your schema
+  folder).
+- **`drizzle`**: a TypeScript module exporting one `pgTable` or `sqliteTable` per table, with its indexes. Export them
+  from your schema so drizzle-kit creates and keeps them.
+
+Regenerate after upgrading Better Files, adding or removing a plugin, or changing additional fields, then run your
+migration tool.
+
+The same output is available in code, from `generateSchema` in `better-files/adapter-sql`:
+
+```ts
+import { generateSchema } from 'better-files/adapter-sql';
+
+const prismaModels = generateSchema(dr.schema, { format: 'prisma', dialect: 'postgres' });
+```
+
+### Leave the tables to Better Files instead
+
+With Drizzle, you can also let `dr.initialize()` create the tables and tell drizzle-kit to ignore them with
+`tablesFilter: ['!better_files_*']` in its config (adjust the pattern if you changed the
+[table prefix](/docs/operations/databases#table-names)).
+
+### What initialize() does with generated tables
+
+`dr.initialize()` still runs `migrate`. When your migration tool has created the tables exactly as generated, it
+finds nothing to create or add. If a table or column is missing, for example because you upgraded Better Files
+without regenerating, it creates it, and your migration tool will then see drift. Regenerating keeps the two in step.
+
+## Related
+
+- [Databases](/docs/operations/databases): the shared SQL layer and the conformance suite.
+- [PostgreSQL](/docs/operations/databases/postgres): partitioned tables and generated partitioned DDL.
+- [Command line](/docs/operations/cli)

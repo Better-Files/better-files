@@ -1,0 +1,244 @@
+---
+title: Databases
+description: The database adapter Better Files stores its tables through, the shared SQL layer behind it, and how to choose one.
+metaTitle: Database adapters
+icon: Database
+packages:
+  [
+    '@better-files/core',
+    '@better-files/adapter-sql',
+    '@better-files/adapter-postgres',
+    '@better-files/adapter-sqlite',
+    '@better-files/adapter-libsql',
+    '@better-files/adapter-pglite',
+    '@better-files/adapter-prisma',
+    '@better-files/adapter-drizzle',
+    '@better-files/testing',
+  ]
+sources:
+  - packages/core/src/ports.ts
+  - packages/core/src/schema.ts
+  - packages/core/src/conformance.ts
+  - packages/adapter-sql/src/index.ts
+  - packages/adapter-sql/src/ddl.ts
+  - packages/server/src/options.ts
+  - packages/testing/src/memory-database.ts
+  - tests/conformance/sql-databases.test.ts
+  - tests/conformance/orm-adapters.test.ts
+  - tests/conformance/memory-database.test.ts
+---
+
+Better Files keeps rooms, folders, documents, versions, members, the activity log, jobs and every plugin's records in
+tables of its own. You decide where those tables live: usually in the database your application already runs, next to
+Better IAM's tables, through the connection you already have.
+
+`betterFiles({ database })` takes a **database adapter**, a small object that reads and writes those tables. Pick the
+one for your database:
+
+```ts
+import { postgresAdapter } from 'better-files/adapter-postgres';
+
+export const dr = betterFiles({
+  database: postgresAdapter({ pool }), // the app's pg Pool
+  // iam, storage, secret, plugins
+});
+
+await dr.initialize(); // creates or upgrades the tables
+```
+
+## Choose an adapter
+
+| Adapter | Import | Database | Use it for |
+| --- | --- | --- | --- |
+| `postgresAdapter` | `better-files/adapter-postgres` | PostgreSQL through `pg` | Production. The only adapter with [partitioned tables](/docs/operations/databases/postgres#partitioned-tables), along with PGlite. |
+| `sqliteAdapter` | `better-files/adapter-sqlite` | SQLite through `better-sqlite3` | Single-server deployments, development, tests. |
+| `libsqlAdapter` | `better-files/adapter-libsql` | libSQL: local files, Turso, `sqld` | SQLite semantics on a hosted or edge database. |
+| `pgliteAdapter` | `better-files/adapter-pglite` | PGlite, PostgreSQL in WebAssembly | Development and tests with production's SQL, single-process apps, edge runtimes. |
+| `prismaAdapter` | `better-files/adapter-prisma` | Your `PrismaClient` (PostgreSQL or SQLite) | Apps where Prisma owns the connection and the migrations. |
+| `drizzleAdapter` | `better-files/adapter-drizzle` | Your drizzle `db` | Apps where Drizzle owns the connection and the migrations. |
+| `memoryDatabase` | `better-files/testing` | In memory | Unit tests and examples. Nothing is persisted. |
+
+Every adapter above passes the same [conformance suite](#the-conformance-suite), so the engine behaves the same on all
+of them.
+
+<Cards>
+  <Card title="PostgreSQL" href="/docs/operations/databases/postgres">
+    Pool sharing, typed placeholders, and range-partitioned tables.
+  </Card>
+  <Card title="SQLite and libSQL" href="/docs/operations/databases/sqlite-and-libsql">
+    better-sqlite3 files, Turso and sqld.
+  </Card>
+  <Card title="PGlite" href="/docs/operations/databases/pglite">
+    Embedded PostgreSQL with no server.
+  </Card>
+  <Card title="Prisma and Drizzle" href="/docs/operations/databases/prisma-and-drizzle">
+    Your ORM's client, and generated schemas for its migration tool.
+  </Card>
+</Cards>
+
+## The adapter contract
+
+`DatabaseAdapter` (from `better-files/core`) is the port every adapter implements. Adapters are called with logical
+model and field names (`aclEntries.nodeId`) and map them to the physical table and column names in the resolved
+schema.
+
+<TypeTable
+  type={{
+    id: { type: 'string', description: 'Names the adapter, such as postgres, sqlite, pglite or prisma:postgresql.', required: true },
+    bind: { type: '(schema) => void', description: 'Called once by betterFiles() before anything else, with the resolved schema.' },
+    migrate: {
+      type: '(schema) => Promise of MigrationResult',
+      description: 'Creates or upgrades tables so they match the schema, and returns the models it created or altered as applied. Idempotent.',
+      required: true,
+    },
+    findOne: { type: '(model, where) => Promise of T | null', description: 'One record, or null.', required: true },
+    findMany: {
+      type: '(model, { where?, orderBy?, limit?, offset? }) => Promise of T[]',
+      description: 'Records in order; ordered by id when orderBy is empty.',
+      required: true,
+    },
+    count: { type: '(model, where?) => Promise of number', description: 'How many records match.', required: true },
+    insert: { type: '(model, record) => Promise of T', description: 'Fails with CONFLICT when a unique field or index would be violated.', required: true },
+    update: { type: '(model, where, patch) => Promise of number', description: 'How many rows changed. id and tenantId cannot change.', required: true },
+    increment: {
+      type: '(model, where, field, by?) => Promise of number | null',
+      description: 'Adds by (default 1) to a number field of the one matching row and returns the new value, or null when no row matches. It holds the row until the transaction ends.',
+      required: true,
+    },
+    delete: { type: '(model, where) => Promise of number', description: 'How many rows were deleted.', required: true },
+    transaction: { type: '(fn) => Promise of R', description: 'Runs fn in one transaction. Nested calls join the outer transaction.', required: true },
+    close: { type: '() => Promise of void', description: 'Called by dr.close().' },
+  }}
+/>
+
+A `where` is a map of field names to filters, ANDed together. A plain value means equality; an object takes `eq`,
+`ne`, `in`, `notIn`, `lt`, `lte`, `gt`, `gte`, `isNull`, and `contains` (a case-insensitive substring match).
+
+Every write happens inside `transaction`. `increment` is how activity sequence numbers and version numbers stay
+gap-free when two requests write at once: the second waits for the first's row lock, then sees its value.
+
+## The shared SQL layer
+
+All the SQL adapters are thin drivers over one implementation, `createSqlAdapter` in `better-files/adapter-sql`. It
+builds the SQL, encodes values, runs migrations, and maps unique-constraint errors to `CONFLICT`. A driver only has to
+run statements and transactions:
+
+```ts
+import { createSqlAdapter, type SqlDriver } from 'better-files/adapter-sql';
+
+const driver: SqlDriver = {
+  dialect: 'postgres', // or 'sqlite'
+  query: (sql, params) => runAndReturnRows(sql, params), // Promise of row objects
+  execute: async (sql, params) => ({ rowsAffected: await runAndCount(sql, params) }),
+  transaction: (fn) => runInTransaction(fn), // BEGIN, fn(driver on that connection), COMMIT or ROLLBACK
+  isUniqueViolation: (error) => (error as { code?: string })?.code === '23505',
+  close: async () => {}, // optional
+};
+
+export const database = createSqlAdapter(driver, { id: 'my-driver' });
+```
+
+`runAndReturnRows`, `runAndCount` and `runInTransaction` stand for your client's own calls. The PostgreSQL, SQLite,
+libSQL, PGlite, Prisma and Drizzle adapters are each such a driver; wrapping another client (a serverless driver, a
+Kysely connection) takes about as much code.
+
+What `migrate` does on a SQL database:
+
+- creates each missing table, with `id` as the primary key and required fields `NOT NULL`;
+- adds columns that are missing from an existing table. Added columns are nullable, since existing rows have no value
+  for them;
+- creates the declared indexes, and one for each `unique` or `indexed` field, with `CREATE INDEX IF NOT EXISTS`.
+
+It never drops a table or a column, and never changes a column's type. Foreign keys are not declared.
+
+Fields map to these column types:
+
+| Field type | PostgreSQL | SQLite |
+| --- | --- | --- |
+| string, enum | `TEXT` | `TEXT` |
+| number, timestamp | `DOUBLE PRECISION` | `REAL` |
+| boolean | `BOOLEAN` | `INTEGER` (0 or 1) |
+| json | `JSONB` | `TEXT` |
+
+Timestamps are stored as epoch milliseconds.
+
+## Share the host's database
+
+Better Files does not need a database of its own. Each adapter can take the client your application already has:
+
+| Adapter | Pass | Closed by `dr.close()` |
+| --- | --- | --- |
+| `postgresAdapter` | `{ pool }` | Only a pool the adapter created from `connectionString`. |
+| `pgliteAdapter` | `{ client }` | Only an instance the adapter created. |
+| `libsqlAdapter` | `{ client }` | The client, including one you passed. |
+| `sqliteAdapter` | `{ filename }`, the same file as Better IAM or another one | Its own connection. |
+| `prismaAdapter` | `{ client: prisma }` | Never: disconnect Prisma yourself. |
+| `drizzleAdapter` | your drizzle `db` | Never: the host owns the connection. |
+
+### Table names
+
+Every table name starts with `better_files_` by default (`better_files_rooms`, `better_files_activity`), so the tables
+sit next to yours without colliding. The `schema` option changes this:
+
+```ts
+betterFiles({
+  schema: {
+    tablePrefix: 'dr_', // lowercase letters, digits and underscores, starting with a letter, up to 24 characters; '' for none
+    rooms: { tableName: 'deal_rooms' }, // rename one core table
+  },
+  // ...
+});
+```
+
+Changing the prefix or a table name after the tables exist does not rename them: `initialize()` creates new, empty
+tables under the new names.
+
+On PostgreSQL, table names are not schema-qualified. Tables are created in, and looked up in, the connection's current
+schema (the first schema on its `search_path`).
+
+## The conformance suite
+
+`better-files/core/conformance` exports the behavior every adapter must share: `databaseConformanceCases()` returns
+the cases, and `conformanceSchema` is a small test schema (one `widgets` table under the prefix `conf_`) they run
+against. Each case expects a fresh, empty adapter on which `migrate(conformanceSchema)` has run. Use it to test your
+own driver:
+
+```ts
+import { describe, it } from 'vitest';
+import { conformanceSchema, databaseConformanceCases } from 'better-files/core/conformance';
+
+describe('my database adapter', () => {
+  for (const testCase of databaseConformanceCases())
+    it(testCase.name, async () => {
+      const db = createMyAdapter(); // fresh and empty for every case
+      try {
+        await db.migrate(conformanceSchema);
+        await testCase.run(db);
+      } finally {
+        await db.close?.();
+      }
+    });
+});
+```
+
+The cases check that an adapter:
+
+- reads back every field type, and omits absent optional fields;
+- filters with every operator, including `contains` with `%`, `_` and `\` taken literally;
+- orders, limits, offsets and counts;
+- reports `CONFLICT` for unique fields, unique indexes and duplicate primary keys;
+- updates and deletes by condition and reports counts;
+- rolls a failed transaction back completely, and makes nested transactions join the outer one;
+- refuses to change `id` or `tenantId`;
+- migrates idempotently, without losing rows;
+- increments atomically, with distinct values under concurrent transactions.
+
+The repository runs the suite on SQLite in memory and in a file, libSQL in a file, PGlite, PostgreSQL when
+`BETTER_FILES_POSTGRES_URL` is set, Prisma-shaped clients over PGlite and SQLite, Drizzle over PGlite and
+better-sqlite3, `memoryDatabase()`, and a partitioned PGlite table.
+
+## Related
+
+- [Database schema](/docs/guides/concepts/schema): the core tables and additional fields.
+- [Command line](/docs/operations/cli): `migrate`, `doctor` and `generate`.
+- [Testing](/docs/operations/testing)

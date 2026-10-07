@@ -1,0 +1,397 @@
+---
+title: Maintenance and jobs
+description: What dr.maintain() sweeps and how to schedule it, and durable background jobs with inline, deferred, BullMQ, pg-boss and SQS runners.
+metaTitle: Maintenance and background jobs
+icon: CalendarClock
+packages: ['@better-files/server', '@better-files/core', '@better-files/jobs', '@better-files/cli']
+sources:
+  - packages/server/src/index.ts
+  - packages/server/src/jobs.ts
+  - packages/server/src/options.ts
+  - packages/core/src/jobs.ts
+  - packages/core/src/plugin.ts
+  - packages/jobs/src/index.ts
+  - packages/jobs/src/shared.ts
+  - packages/jobs/src/bullmq.ts
+  - packages/jobs/src/pg-boss.ts
+  - packages/jobs/src/sqs.ts
+  - packages/jobs/README.md
+  - packages/cli/src/cli.ts
+  - tests/server/jobs.test.ts
+  - PLAN.md
+---
+
+Better Files is a library, so it has no process of its own. Some work cannot happen inside a request: download
+tickets expire, abandoned uploads leave parts in storage, the trash fills up, rooms reach their scheduled close date,
+and guests' access windows end. Plugins add more, such as retrying failed webhook deliveries or sending digests.
+
+Your app runs this work in two ways:
+
+- **Maintenance**: one call, `dr.maintain()`, that you schedule every few minutes. It sweeps what has expired.
+- **Jobs**: durable background tasks that plugins and your code enqueue. A job is a row in the `jobs` table, so it
+  survives a crash and is retried with backoff.
+
+```ts
+// Every five minutes, from a single process:
+setInterval(
+  () => void dr.maintain().catch((error) => console.error('maintain failed', error)),
+  5 * 60_000,
+);
+```
+
+Or run it as its own process with the CLI:
+
+```sh
+npx better-files maintain --every 300
+```
+
+## What maintain() does
+
+Each run works through these steps, in this order, and returns how much it did:
+
+```ts
+const result = await dr.maintain();
+// { tickets: 12, uploads: 1, purged: 0, closed: 0, expiredMembers: 2, jobs: 0 }
+```
+
+<TypeTable
+  type={{
+    tickets: {
+      type: 'number',
+      description: 'Download and viewer tickets deleted because they expired more than a minute ago.',
+    },
+    uploads: {
+      type: 'number',
+      description: 'Upload sessions that expired before completing (status pending or uploaded) and were discarded, up to 200 per run.',
+    },
+    purged: {
+      type: 'number',
+      description: "Folders and documents deleted for good because they sat in the trash longer than the room's trashRetentionDays (30 by default).",
+    },
+    closed: {
+      type: 'number',
+      description: 'Live rooms whose closesAt passed, closed as an administrator would close them (up to 100 per run).',
+    },
+    expiredMembers: {
+      type: 'number',
+      description: 'Members whose access window (expiresAt) ended, up to 500 per run.',
+    },
+    jobs: {
+      type: 'number',
+      description: 'Due jobs that maintenance ran itself because their runner had not.',
+    },
+  }}
+/>
+
+In more detail:
+
+1. **Tickets.** Ticket rows are deleted a minute after they expire. An expired ticket is already refused when used;
+   this only keeps the table small.
+2. **Uploads.** Sessions still `pending` or `uploaded` after their `expiresAt` (24 hours by default,
+   `limits.uploadTtlMs`) are discarded together with what was stored for them. Rows of completed and aborted uploads
+   are deleted a week after they expired.
+3. **Trash.** Items deleted more than a day ago are checked against their room's `trashRetentionDays`. Expired items
+   are removed with their versions, renditions, permission entries and stored objects. A plugin `retains` hook can keep
+   them: the [retention plugin](/docs/plugins/retention) does this for legal holds, and held items stay in the trash
+   until the hold is released. Up to 1,000 trashed items are looked at per run.
+4. **Scheduled closes.** Rooms in the `live` state whose `closesAt` has passed are closed, with the same activity and
+   events as a manual close.
+5. **Expired members.** Active or invited members whose `expiresAt` has passed are taken out of the room in the
+   identity system (out of the room's groups, relation revoked, or an unredeemed invitation withdrawn), marked
+   `expired`, and recorded as `member.expired` in the activity log and as an event. A member that fails is logged and
+   tried again on the next run.
+6. **Plugin hooks.** Each plugin's `maintain(context)` runs, in the order the plugins are registered.
+7. **Jobs.** Jobs that are due and that the runner should have run by now are run (see
+   [Recovery](#recovery-and-at-least-once-delivery)).
+
+Each step works in batches, so a large backlog clears over several runs rather than in one long call.
+
+<Callout type="warn" title="A failing plugin hook stops the run">
+  `dr.maintain()` does not catch errors from plugin `maintain` hooks. If one throws, the call rejects and the later
+  hooks and the job recovery step do not run until the next call. Log the rejection so you notice.
+</Callout>
+
+### Plugin maintenance
+
+Plugins add their own sweeps through the `maintain` hook. Among the first-party plugins:
+
+| Plugin | What its hook does |
+| --- | --- |
+| [Webhooks](/docs/plugins/webhooks) | Retries deliveries that are due and not yet delivered. |
+| [Notifications](/docs/plugins/notifications) | Sends each person one digest per room with what was queued since the last one. |
+| [Retention](/docs/plugins/retention) | With `closedRoomRetentionDays` set, emits `room.retention-expired` once for each closed or archived room past it that no hold keeps. |
+| [Scanning](/docs/plugins/scan) | Scans again versions still quarantined after the retry delay. |
+| [Processing](/docs/plugins/processing) | Retries failed conversions (up to three attempts). |
+| [Reviews](/docs/plugins/reviews), [Tasks](/docs/plugins/tasks) | Report overdue access reviews and tasks once. |
+| [Quotas](/docs/plugins/quotas) | Recounts the rooms counted longest ago, so purged content gives its space back. |
+| [Storage cluster](/docs/operations/storage/cluster) | Reconciles the cluster's nodes and objects. |
+
+A hook receives a `MaintenanceContext`: `db`, `storage`, `now`, `logger`, `readVersion(tenantId, versionId)`,
+`renditions(tenantId)`, `emit(event)` and `enqueue(tenantId, name, payload, options?)`.
+
+```ts
+import { definePlugin } from 'better-files';
+
+export const staleUploadsReport = definePlugin({
+  id: 'stale-report',
+  async maintain(context) {
+    const stale = await context.db.findMany('uploads', {
+      where: { status: 'pending', createdAt: { lt: context.now - 3_600_000 } },
+      limit: 100,
+    });
+    if (stale.length) context.logger.warn('Uploads open for over an hour', { count: stale.length });
+  },
+});
+```
+
+### How often, and from where
+
+The instance documents maintenance as periodic work to schedule every few minutes. Some sweeps are only as precise as
+your schedule: a room set to close at noon closes at the first run after noon, and an access window ends at the first
+run after it expires (relations and group memberships that carry an expiry in the identity system lapse there on
+time).
+
+| Where your app runs | How to schedule it |
+| --- | --- |
+| One long-running server | A `setInterval` in the server process, as above. |
+| Several instances | One scheduler, not every instance: a cron job, your platform's scheduled tasks, or a single `better-files maintain --every 300` process. |
+| Serverless | A scheduled function or cron route that calls `dr.maintain()` once per invocation. |
+
+`better-files maintain` loads your instance from `better-files.config.ts` (see [the CLI](/docs/operations/cli)),
+runs once and exits. With `--every <seconds>` (at least 10) it runs at once and then on that interval, printing each
+result as a timestamped JSON line, and keeps going after a failed run.
+
+## Durable jobs
+
+A job is work that must happen after a change commits and must not be lost: scanning an upload, sending a delivery,
+rebuilding an index. Better Files writes the job to its `jobs` table in the same transaction as the change that asked
+for it, so the job exists exactly when that change committed. A **runner** then decides where it executes.
+
+### Define a job
+
+```ts
+import { definePlugin } from 'better-files';
+import { defineJob } from 'better-files/core';
+
+export const previews = definePlugin({
+  id: 'previews',
+  jobs: {
+    render: defineJob<{ versionId: string }>({
+      async handler(payload, context) {
+        const content = await context.readVersion(context.tenantId, payload.versionId);
+        // … render a preview and store it with context.renditions(context.tenantId).put(…)
+      },
+      maxAttempts: 3,
+    }),
+  },
+  async onEvent(event, context) {
+    if (event.type === 'document.uploaded' && typeof event.data.versionId === 'string')
+      await context.enqueue(event.tenantId, 'previews.render', { versionId: event.data.versionId });
+  },
+});
+```
+
+<TypeTable
+  type={{
+    handler: {
+      type: '(payload, context: JobContext) => Promise of void',
+      description: 'Does the work. Throwing fails this attempt.',
+      required: true,
+    },
+    maxAttempts: {
+      type: 'number',
+      description: 'Attempts before the job is marked failed.',
+      default: '5',
+    },
+    backoff: {
+      type: '(attempt: number) => number',
+      description: 'Milliseconds to wait before the next attempt.',
+      default: '30 seconds, doubling, capped at 1 hour',
+    },
+    leaseMs: {
+      type: 'number',
+      description: 'How long one attempt may hold the job before another worker may take it over (a crashed process).',
+      default: '5 minutes',
+    },
+  }}
+/>
+
+The handler's `context` is the maintenance context described above, plus `tenantId` and
+`job: { id, name, attempt, maxAttempts }`. Payloads are stored as JSON, so pass ids and small values, not file
+contents.
+
+**Names.** A plugin job is named `{pluginId}.{name}`; the name starts with a lowercase letter and holds letters, digits
+and hyphens. Jobs your app defines go in `jobs.handlers` and may not contain dots:
+
+```ts
+export const dr = betterFiles({
+  // iam, database, storage, secret, plugins …
+  jobs: {
+    handlers: {
+      'crm-sync': defineJob<{ roomId: string }>({
+        async handler(payload, context) {
+          // …
+        },
+      }),
+    },
+  },
+});
+```
+
+The same name defined twice, or a definition without a handler, fails when `betterFiles()` builds the instance.
+
+### Enqueue a job
+
+| From | Call | When the job is written |
+| --- | --- | --- |
+| A plugin endpoint (`PluginContext`) | `context.enqueue(name, payload, options?)` | In the operation's transaction: it exists only if the operation commits. |
+| `maintain`, `onEvent`, a job handler | `context.enqueue(tenantId, name, payload, options?)` | At once. |
+| Your code | `dr.jobs.enqueue(tenantId, name, payload, options?)` | At once. |
+
+Each returns a `JobEnvelope`: `{ id, tenantId, name, runAt }`. Prefer `context.enqueue` over `afterCommit` for work that
+must survive a crash or be retried. An unknown job name is `INVALID_INPUT`.
+
+<TypeTable
+  type={{
+    delayMs: { type: 'number', description: 'Run no earlier than this many milliseconds from now.' },
+    runAt: { type: 'number', description: 'Run no earlier than this time (epoch milliseconds).' },
+    key: {
+      type: 'string',
+      description: 'Deduplication key per tenant and job name: while a job with this key is pending or running, enqueueing returns that job instead of adding another.',
+    },
+    maxAttempts: { type: 'number', description: "Overrides the definition's maxAttempts." },
+  }}
+/>
+
+### Choose a runner
+
+`jobs.runner` decides where jobs execute:
+
+| Runner | Behavior | Good for |
+| --- | --- | --- |
+| `'inline'` (default) | Jobs run in this process right after the enqueueing operation commits, at most `jobs.concurrency` (default 4) at once. Delayed jobs and retries wait on timers; those due more than an hour later are left to `dr.maintain()`. | Development, single-server apps. |
+| `'deferred'` | Jobs wait in the table until you call `dr.jobs.work()` or `dr.maintain()`. | Serverless hosts, apps with their own workers. |
+| A `JobRunner` | Jobs go to your queue: `bullmqRunner`, `pgBossRunner` or `sqsRunner` from `better-files/jobs`, or your own. | Apps with Redis, pg-boss or SQS. |
+
+With `'deferred'`, call `work` from a cron route or worker loop:
+
+```ts
+const { ran, completed, retried, failed } = await dr.jobs.work({ limit: 50 });
+```
+
+`work({ limit?, names? })` runs up to `limit` due jobs (100 by default), optionally only the named ones.
+
+### Queue runners
+
+The runners in `better-files/jobs` only **deliver** jobs. A queue message names the job (`{ id, tenantId, name }`;
+SQS messages also carry `runAt`) and never holds the payload, so the queue holds no room data. The worker calls
+`dr.jobs.run(id)`. Attempts, backoff, leases and failures stay in the `jobs` table, and the queue's own retries are
+turned off. Neither queue library is a dependency: you pass your own `Queue`, `Worker` or `PgBoss`.
+
+<Tabs items={['BullMQ', 'pg-boss', 'SQS']}>
+<Tab value="BullMQ">
+
+```ts
+import { Queue, Worker } from 'bullmq';
+import { bullmqRunner } from 'better-files/jobs';
+
+const connection = { host: 'localhost', port: 6379 };
+const queue = new Queue('better-files', { connection });
+
+export const dr = betterFiles({
+  // …
+  jobs: {
+    runner: bullmqRunner({
+      queue,
+      // Only in processes that call dr.jobs.start():
+      worker: (processor) => new Worker('better-files', processor, { connection, concurrency: 8 }),
+    }),
+  },
+});
+
+await dr.jobs.start(); // in the worker process, or every server
+```
+
+Options: `queue` (required), `worker`, `keep` (BullMQ's `removeOnComplete` and `removeOnFail`; by default no completed
+jobs and the last 1,000 failed), `priority`, `recoverAfterMs` and `closeQueue` (also close the queue on
+`dr.close()`, default false). A worker built elsewhere uses `bullmqProcessor(dr)` as its processor.
+
+</Tab>
+<Tab value="pg-boss">
+
+```ts
+import { PgBoss } from 'pg-boss';
+import { pgBossRunner } from 'better-files/jobs';
+
+const boss = await new PgBoss(process.env.DATABASE_URL!).start();
+
+export const dr = betterFiles({
+  // …
+  jobs: { runner: pgBossRunner({ boss, work: { localConcurrency: 4 } }) },
+});
+
+await dr.jobs.start();
+```
+
+Options: `boss` (a started instance, which you stop), `queue` (default `better-files`), `createQueue` (create the
+queue on first use, default true), `work` (`batchSize`, `pollingIntervalSeconds`, `localConcurrency`), `priority` and
+`recoverAfterMs`. A worker registered elsewhere uses `boss.work('better-files', pgBossHandler(dr))`.
+
+</Tab>
+<Tab value="SQS">
+
+```ts
+import { sqsRunner } from 'better-files/jobs';
+
+const runner = sqsRunner({ queueUrl, region: 'eu-west-1', credentials });
+export const dr = betterFiles({ /* … */ jobs: { runner } });
+
+await dr.jobs.start(); // a long-running consumer, or:
+export const handler = runner.lambdaHandler(dr); // an SQS-triggered Lambda
+```
+
+The runner talks to SQS over signed `fetch` calls, without the AWS SDK. Options: `queueUrl`, `region`, `credentials`
+(an object or an async function), `endpoint`, `fetch`, `pollers` (default 1), `waitTimeSeconds` (default 20),
+`batchSize` (default 10), `recoverAfterMs` and `logger`. Jobs due within 15 minutes use the message delay; later jobs
+are held back by the consumer. For the Lambda handler, turn on `ReportBatchItemFailures` in the event source mapping.
+
+</Tab>
+</Tabs>
+
+Another queue needs only a `JobRunner` from `better-files/core`: an `id`, `dispatch(jobs)` (called after the
+enqueueing transaction commits and after each failed attempt that will be retried), and optionally `start(run)`,
+`close()` and `recoverAfterMs`.
+
+### Recovery and at-least-once delivery
+
+`dr.maintain()` runs due jobs the runner has not run: after a crash, a lost queue message, or with the deferred
+runner. For queue runners it waits until a job has been due for `recoverAfterMs` (5 minutes by default), so it only
+catches what the queue lost. If dispatching to the queue fails, the error is logged and maintenance picks the job up.
+
+Running a job is safe to repeat. `dr.jobs.run(id)` claims the job with a lease, and a second run of the same job is
+`skipped`. If an attempt outlives its `leaseMs`, another worker may start it again, so handlers that can run long
+should be idempotent.
+
+### Inspect and manage jobs
+
+| Method | What it does |
+| --- | --- |
+| `dr.jobs.get(tenantId, id)` | One job, or `null`. |
+| `dr.jobs.list(tenantId, { status?, name?, limit? })` | Newest first; 100 by default, at most 1,000. |
+| `dr.jobs.retry(tenantId, id)` | Puts a `failed` or `cancelled` job back, due now, with a fresh set of attempts. `NOT_FOUND` or `CONFLICT` otherwise. |
+| `dr.jobs.cancel(tenantId, id)` | Cancels a pending job; a running one finishes its attempt but is not retried. Returns false when already finished. |
+| `dr.jobs.run(id)` | Runs one job: what a queue consumer calls. Returns `completed`, `retry`, `failed` or `skipped`. |
+| `dr.jobs.start()` | Starts the runner's consumer in this process; does nothing for `inline` and `deferred`. |
+| `dr.jobs.drain()` | Resolves when no inline job is running or queued in this process (tests, shutdown). |
+
+A job's status is `pending`, `running`, `completed`, `failed` or `cancelled`. A job whose handler no longer exists
+(its plugin was removed) is marked `failed` rather than retried forever.
+
+`dr.close()` stops the runner, waits for inline jobs in progress, and closes the database adapter.
+
+## Related
+
+- [Deployment](/docs/operations/deployment): long-running servers and serverless hosts
+- [CLI](/docs/operations/cli): `better-files maintain`
+- [Testing](/docs/operations/testing): run jobs deterministically in tests
+- [Plugins](/docs/plugins)

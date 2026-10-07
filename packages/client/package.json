@@ -1,0 +1,49 @@
+{
+  "name": "@better-files/client",
+  "version": "0.1.0",
+  "description": "Browser-safe typed client for Better Files: calls, a parallel resumable uploader, and download links.",
+  "type": "module",
+  "license": "Apache-2.0",
+  "author": "Better Files contributors",
+  "homepage": "https://github.com/Better-Files/better-files/tree/main/packages/client#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Better-Files/better-files.git",
+    "directory": "packages/client"
+  },
+  "bugs": {
+    "url": "https://github.com/Better-Files/better-files/issues"
+  },
+  "keywords": [
+    "data-room",
+    "better-iam",
+    "typescript",
+    "client",
+    "sdk",
+    "browser"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "sideEffects": false,
+  "scripts": {
+    "build": "tsc -b"
+  },
+  "dependencies": {}
+}

@@ -1,0 +1,98 @@
+---
+title: Nuxt and h3
+metaTitle: Better Files for Nuxt, Nitro and h3
+description: Serve the protocol from a Nitro catch-all route with betterFilesH3, on h3 v1 and v2, and call the API as the signed-in person from server routes.
+icon: Nuxt
+packages:
+  - '@better-files/middleware'
+  - '@better-files/vue'
+sources:
+  - packages/middleware/src/h3.ts
+  - packages/middleware/src/index.ts
+---
+
+`better-files/middleware/h3` serves the protocol from any h3 app: Nuxt, Nitro, Analog and SolidStart. It does not
+import h3. It accepts both event shapes:
+
+- **h3 v2** events carry a web `Request` (`event.req`), which it answers with a `Response`;
+- **h3 v1** events carry Node's request and response (`event.node`), which it streams through directly.
+
+## Mount the protocol
+
+```ts title="server/routes/api/better-files/[...path].ts"
+import { betterFilesH3 } from 'better-files/middleware/h3';
+import { dr } from '~~/server/better-files';
+
+export default defineEventHandler(betterFilesH3(dr));
+```
+
+The route folder must match `basePath` on `betterFiles()`, which defaults to `/api/better-files`. Use a `server/routes`
+file rather than `server/api`, so the path stays exactly the base path.
+
+On h3 v2, pass the client address for rate limits, IP rules and the activity log. On h3 v1, Better Files reads it from
+the socket.
+
+```ts
+export default defineEventHandler(
+  betterFilesH3(dr, { ip: (event) => (event.req as Request).headers.get('x-real-ip') ?? undefined }),
+);
+```
+
+## The instance
+
+Create it once, in a server-only module, and initialize it from a Nitro plugin, or at deploy time with
+`npx better-files migrate`:
+
+```ts title="server/plugins/better-files.ts"
+import { dr } from '~~/server/better-files';
+
+export default defineNitroPlugin(async () => {
+  await dr.initialize();
+});
+```
+
+Schedule `dr.maintain()` with Nitro's scheduled tasks, an external cron, or `npx better-files maintain --every 300`.
+
+## Server routes as the signed-in person
+
+Bind the API to the request's cookies or bearer token with `bindApi`, and guard a node with `requireCapabilities`:
+
+```ts title="server/api/deals/[roomId]/[nodeId].get.ts"
+import { bindApi, errorResponse, requireCapabilities, toHeaders } from 'better-files/middleware';
+import { dr } from '~~/server/better-files';
+
+export default defineEventHandler(async (event) => {
+  const credential = { headers: toHeaders(getRequestHeaders(event)) };
+  const { roomId, nodeId } = getRouterParams(event);
+  const tenantId = event.context.tenantId as string; // however your app knows the tenant
+  try {
+    await requireCapabilities(dr, credential, { tenantId, roomId, nodeId, capabilities: ['VIEW'] });
+    return await bindApi(dr, credential).documents.get({ tenantId, nodeId });
+  } catch (error) {
+    const { status, body } = errorResponse(error);
+    if (status === 500) throw error;
+    setResponseStatus(event, status);
+    return body;
+  }
+});
+```
+
+`requireCapabilities` throws `NOT_FOUND` for a node the person cannot list and `FORBIDDEN` for one they can see but
+not use. `errorResponse` turns any Better Files or Better IAM error into the protocol's status and
+`{ error: { code, message } }` body.
+
+## The browser
+
+Use the [Vue bindings](/docs/frameworks/vue) from a client-only Nuxt plugin:
+
+```ts title="plugins/files.client.ts"
+import { createBetterFilesClient } from 'better-files/client';
+import type { dr } from '~~/server/better-files';
+import { files } from '~/lib/files'; // createBetterFilesVue<typeof dr>()
+
+export default defineNuxtPlugin((nuxtApp) => {
+  nuxtApp.vueApp.use(files.plugin, {
+    client: createBetterFilesClient<typeof dr>({ tenantId: () => useTenant().value }),
+  });
+});
+```

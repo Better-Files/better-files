@@ -1,0 +1,19 @@
+{
+  "title": "Operations",
+  "description": "Databases, storage, encryption, background work, and deployment",
+  "root": true,
+  "icon": "Server",
+  "pages": [
+    "index",
+    "---Data---",
+    "databases",
+    "storage",
+    "encryption",
+    "---Running it---",
+    "maintenance-and-jobs",
+    "deployment",
+    "cli",
+    "testing",
+    "security"
+  ]
+}

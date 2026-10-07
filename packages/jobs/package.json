@@ -1,0 +1,53 @@
+{
+  "name": "@better-files/jobs",
+  "version": "0.1.0",
+  "description": "Queue runners for Better Files jobs: BullMQ and pg-boss, with Better Files keeping retries, backoff and recovery in its own jobs table.",
+  "type": "module",
+  "license": "Apache-2.0",
+  "author": "Better Files contributors",
+  "homepage": "https://github.com/Better-Files/better-files/tree/main/packages/jobs#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Better-Files/better-files.git",
+    "directory": "packages/jobs"
+  },
+  "bugs": {
+    "url": "https://github.com/Better-Files/better-files/issues"
+  },
+  "keywords": [
+    "data-room",
+    "better-iam",
+    "typescript",
+    "jobs",
+    "queue",
+    "bullmq",
+    "pg-boss"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "sideEffects": false,
+  "scripts": {
+    "build": "tsc -b"
+  },
+  "dependencies": {
+    "@better-files/core": "workspace:*",
+    "@better-files/storage-s3": "workspace:*"
+  }
+}

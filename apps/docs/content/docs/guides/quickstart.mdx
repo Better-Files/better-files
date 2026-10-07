@@ -1,0 +1,316 @@
+---
+title: Quickstart
+description: Build a working data room in one file with in-memory adapters, then see what changes for production.
+icon: Rocket
+packages: ['better-files']
+sources:
+  - examples/quickstart/index.ts
+  - tests/examples/quickstart.test.ts
+  - examples/express-better-iam/better-files.ts
+  - examples/express-better-iam/server.ts
+  - packages/testing/src/index.ts
+  - packages/core/src/capabilities.ts
+  - packages/server/src/index.ts
+  - packages/server/src/files.ts
+  - packages/server/src/endpoints/permissions.ts
+---
+
+This walkthrough builds a data room in a single script, with no database server, no object storage and no identity
+system to run. It creates a room with a folder and a document, gives a buyer access through a permission group,
+shows what the buyer may and may not do, downloads the file through a short-lived ticket, and verifies the activity
+log. It is the same code as `examples/quickstart/index.ts`, which runs in the Better Files test suite.
+
+The in-memory adapters and the fake identity system come from `better-files/testing`. Every call after the setup
+step is the same `dr.api` call you make in production.
+
+<Callout title="Requirements">
+  Node.js 22.12 or newer. Better Files is ESM-only, so set `"type": "module"` in your `package.json`. To run a
+  `.ts` file directly with `node`, use Node.js 22.18 or newer, or a TypeScript runner such as `tsx`.
+</Callout>
+
+<Steps>
+<Step>
+
+### Install
+
+```npm
+npm install better-files
+```
+
+The quickstart does not need `better-iam`: it uses the fake identity system instead.
+
+</Step>
+<Step>
+
+### Create the instance
+
+`fakeIam` stands in for Better IAM. It knows two people, and it treats the bearer token as the user id, so
+`{ token: 'olivia' }` is Olivia's credential. `relationDecider` makes its authorization decisions from the room
+roles, the way the Better IAM access model does: Olivia may do anything in the tenant, Ben may only read rooms.
+
+```ts title="index.ts"
+import { coreAccessModel } from 'better-files/core';
+import { localKeyProvider } from 'better-files/crypto';
+import { betterFiles } from 'better-files/server';
+import { fakeIam, memoryDatabase, memoryStorage, relationDecider } from 'better-files/testing';
+
+const TENANT = 'acme';
+const secret = 'replace-me-with-a-32-plus-character-secret';
+
+const iam = fakeIam({
+  principals: {
+    olivia: { id: 'olivia', tenantId: TENANT, name: 'Olivia Owner', email: 'olivia@seller.test' },
+    ben: { id: 'ben', tenantId: TENANT, name: 'Ben Buyer', email: 'ben@buyer.test' },
+  },
+  decide: relationDecider(coreAccessModel, {
+    tenantActions: (principal) => (principal.id === 'olivia' ? ['*'] : ['better-files:rooms:read']),
+    roomOf: async (type, id) =>
+      (await dr.resolveForIam({ tenantId: TENANT, type, id }))?.attributes.roomId as
+        | string
+        | undefined,
+  }),
+});
+
+const dr = betterFiles({
+  iam,
+  database: memoryDatabase(),
+  storage: memoryStorage(),
+  secret,
+  encryption: { keys: localKeyProvider({ secret }) },
+});
+await dr.initialize();
+
+const olivia = { token: 'olivia' };
+const ben = { token: 'ben' };
+```
+
+- `secret` must be at least 32 characters. It signs download tickets.
+- `encryption` is required unless the identity integration provides keys. `localKeyProvider` derives a key per
+  tenant from a secret, which is fine for development.
+- `dr.initialize()` creates the tables. On a real database you run it at deploy time.
+
+</Step>
+<Step>
+
+### Create a room and a folder
+
+Every `dr.api` call takes the caller's credential first, then an input with the `tenantId`. A new room comes with a
+root folder, `room.rootNodeId`.
+
+```ts title="index.ts (continued)"
+const room = await dr.api.rooms.create(olivia, { tenantId: TENANT, name: 'Project Falcon' });
+const financials = await dr.api.folders.create(olivia, {
+  tenantId: TENANT,
+  parentId: room.rootNodeId,
+  name: 'Financials',
+});
+```
+
+</Step>
+<Step>
+
+### Upload a document
+
+An upload has three parts: open an upload session, send the bytes, then complete it. Completing creates the document
+(or a new version of an existing one).
+
+```ts title="index.ts (continued)"
+const content = new TextEncoder().encode('Revenue 2025: 12.4m');
+const session = await dr.api.uploads.create(olivia, {
+  tenantId: TENANT,
+  parentId: financials.id,
+  filename: 'revenue.txt',
+  size: content.byteLength,
+});
+await dr.files.upload(olivia, { tenantId: TENANT, uploadId: session.uploadId, body: content });
+const { document } = await dr.api.uploads.complete(olivia, {
+  tenantId: TENANT,
+  uploadId: session.uploadId,
+});
+```
+
+The bytes are encrypted as they are stored. In a browser, the client's `upload()` does all three parts for you.
+
+</Step>
+<Step>
+
+### Set permissions
+
+Access is granted to **permission groups** (or to single people). Here Olivia creates a "Buyers" group with the
+`download` preset on the whole room, which grants `LIST`, `VIEW`, `PRINT` and `DOWNLOAD_WATERMARKED`, but not
+`DOWNLOAD_ORIGINAL`. Then she invites Ben into it by email.
+
+```ts title="index.ts (continued)"
+const buyers = await dr.api.groups.create(olivia, {
+  tenantId: TENANT,
+  roomId: room.id,
+  name: 'Buyers',
+  preset: 'download',
+});
+await dr.api.members.invite(olivia, {
+  tenantId: TENANT,
+  roomId: room.id,
+  email: 'ben@buyer.test',
+  groupIds: [buyers.id],
+});
+```
+
+Ben's invitation is claimed the first time he calls Better Files. Now check what he sees and what he may do:
+
+```ts title="index.ts (continued)"
+const index = await dr.api.rooms.index(ben, { tenantId: TENANT, roomId: room.id });
+console.log(index.map((node) => `${node.index} ${node.name}`));
+// [ '1 Financials', '1.1 revenue.txt' ]
+
+const benMay = await dr.capabilitiesFor(ben, {
+  tenantId: TENANT,
+  roomId: room.id,
+  nodeIds: [document.id],
+});
+console.log(benMay[document.id]); // includes 'VIEW' and 'DOWNLOAD_WATERMARKED', not 'DOWNLOAD_ORIGINAL'
+```
+
+`rooms.index` numbers every folder and document the caller may list. `capabilitiesFor` returns the effective
+capabilities from the permission matrix, which you use to show or hide buttons.
+
+To change access on one folder, set entries on it. A deeper entry can narrow or widen what the folder above gives:
+
+```ts
+await dr.api.permissions.setEntries(olivia, {
+  tenantId: TENANT,
+  nodeId: financials.id,
+  entries: [{ subject: { type: 'group', id: buyers.id }, preset: 'view' }],
+});
+```
+
+</Step>
+<Step>
+
+### Request a download
+
+Downloads go through a **ticket**: a signed token that is valid for 60 seconds. You request it through the API, which
+checks permissions, then serve it with `dr.files.serve`, which streams the decrypted bytes.
+
+Ben may not take the original, so his request is refused:
+
+```ts title="index.ts (continued)"
+await dr.api.documents
+  .requestOriginal(ben, { tenantId: TENANT, nodeId: document.id })
+  .catch((error: Error) => console.log('Original download:', error.message));
+```
+
+Olivia may:
+
+```ts title="index.ts (continued)"
+const ticket = await dr.api.documents.requestOriginal(olivia, {
+  tenantId: TENANT,
+  nodeId: document.id,
+});
+const response = await dr.files.serve(ticket.token);
+console.log(await response.text()); // Revenue 2025: 12.4m
+```
+
+`documents.requestDownload` asks for the watermarked copy instead, which `DOWNLOAD_WATERMARKED` allows. Serving it
+needs a plugin that produces watermarked files, such as the [watermark plugin](/docs/plugins/watermark); without one,
+`dr.files.serve` answers 501 `UNSUPPORTED`.
+
+</Step>
+<Step>
+
+### Read the activity log
+
+Everything above is recorded in the room's activity log. Each entry is hashed together with the one before it, so
+`dr.verifyActivity` detects any edit or deletion.
+
+```ts title="index.ts (continued)"
+const activity = await dr.api.activity.list(olivia, { tenantId: TENANT, roomId: room.id });
+console.log(activity.map((record) => `${record.actorId} ${record.action}`).reverse());
+console.log(await dr.verifyActivity({ tenantId: TENANT, roomId: room.id })); // { valid: true, … }
+await dr.close();
+```
+
+Run the script with `node index.ts` (Node.js 22.18 or newer) or `npx tsx index.ts`.
+
+</Step>
+</Steps>
+
+## Next: production
+
+Three things change for production, and [Installation](/docs/guides/installation) covers each of them:
+
+- **Identity.** Replace `fakeIam` with `betterIamIntegration(iam)`, so Better IAM signs people in, decides each
+  action, and encrypts files with a key per room from its KMS.
+- **Database.** Replace `memoryDatabase()` with a SQL adapter, such as PostgreSQL or SQLite.
+- **Storage.** Replace `memoryStorage()` with S3-compatible storage or a directory on disk.
+
+This is the shape of `examples/express-better-iam`, trimmed to the parts that change:
+
+```ts title="better-files.ts"
+import { betterIam } from 'better-iam';
+import { sqliteAdapter as iamSqlite } from 'better-iam/adapter-sqlite';
+import { sqliteAdapter } from 'better-files/adapter-sqlite';
+import {
+  betterIamFeatures,
+  betterIamIntegration,
+  betterFilesIamPlugin,
+  betterFilesResolver,
+} from 'better-files/iam';
+import { ndaPlugin } from 'better-files/plugin-nda';
+import { watermarkPlugin } from 'better-files/plugin-watermark';
+import { betterFiles } from 'better-files/server';
+import { fileStorage } from 'better-files/storage-fs';
+
+export const plugins = [ndaPlugin(), watermarkPlugin()] as const;
+
+// Registers the Better Files actions and resource types on Better IAM.
+const iamPlugin = betterFilesIamPlugin({ plugins });
+
+export const iam = betterIam({
+  database: iamSqlite({ filename: 'iam.db' }),
+  secret: process.env.IAM_SECRET!,
+  baseURL: 'http://localhost:3000',
+  plugins: [iamPlugin],
+  resolveResource: betterFilesResolver(() => dr),
+});
+
+export const dr = betterFiles({
+  iam: betterIamIntegration(iam, {
+    iamPlugin,
+    // A service account allowed the actions in systemPolicy(iam).
+    systemCredential: () => ({ token: process.env.BETTER_FILES_SERVICE_TOKEN! }),
+    // better-iam 0.2.0 on npm has no guests: invite outsiders as tenant members instead.
+    ...(betterIamFeatures(iam).guests ? {} : { externalInvites: 'members' as const }),
+  }),
+  database: sqliteAdapter({ filename: 'better-files.db' }),
+  storage: fileStorage({ root: './files' }),
+  secret: process.env.BETTER_FILES_SECRET!,
+  plugins,
+});
+```
+
+Then mount the protocol with a framework adapter and schedule maintenance:
+
+```ts title="server.ts"
+import express from 'express';
+import { createBetterFilesExpress } from 'better-files/middleware/express';
+import { dr, iam } from './better-files.js';
+
+await iam.initialize();
+await dr.initialize(); // in production, run `better-files migrate` at deploy time instead
+
+const app = express();
+const rooms = createBetterFilesExpress(dr);
+app.use(express.json());
+app.use(rooms.middleware); // POST /api/better-files/{group}/{method}, uploads and file tickets
+app.use(rooms.errorHandler);
+
+setInterval(() => void dr.maintain().catch(console.error), 5 * 60_000);
+app.listen(3000);
+```
+
+## Related
+
+- [Installation](/docs/guides/installation)
+- [Concepts](/docs/guides/concepts)
+- [Better IAM integration](/docs/guides/better-iam)
+- [Testing](/docs/operations/testing): the in-memory adapters and fakes in your own tests.

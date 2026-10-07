@@ -1,0 +1,97 @@
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+# The workspace tests against better-iam from npm, as users install it. The `better-iam-main` job also runs it
+# against Better IAM's main branch, so unreleased Better IAM changes (guests, for one) are covered before release.
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        node: [22, 24]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 12.5.1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      - name: Install
+        run: pnpm install --frozen-lockfile
+      - name: Typecheck, test, validate packages
+        run: pnpm check
+      - name: Format
+        if: matrix.os == 'ubuntu-latest' && matrix.node == 24
+        run: pnpm format:check
+      - name: Pack
+        if: matrix.os == 'ubuntu-latest' && matrix.node == 24
+        run: pnpm pack:all
+      # The tarballs installed with npm into a clean app, with better-iam from the registry: no heavy required
+      # peers, packed types typecheck, Better Files on Better IAM end to end, every umbrella subpath loads.
+      - name: Packed smoke
+        if: matrix.node == 24
+        run: pnpm smoke:packed --no-build
+
+  better-iam-main:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: data-room
+      - uses: actions/checkout@v4
+        with:
+          repository: Better-IAM/better-iam
+          path: better-iam
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 12.5.1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Build better-iam
+        working-directory: better-iam
+        run: npx --yes pnpm@11.19.0 install --frozen-lockfile && npx --yes pnpm@11.19.0 build
+      - name: Link it
+        working-directory: data-room
+        run: node scripts/better-iam.mjs link ../better-iam && pnpm install --no-frozen-lockfile
+      - name: Typecheck and test
+        working-directory: data-room
+        run: pnpm typecheck && pnpm test
+
+  postgres:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_PASSWORD: better-files-ci
+          POSTGRES_DB: better_files_test
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd pg_isready --health-interval 5s
+          --health-timeout 5s --health-retries 10
+    env:
+      BETTER_FILES_POSTGRES_URL: postgres://postgres:better-files-ci@localhost:5432/better_files_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 12.5.1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: pnpm install --frozen-lockfile && pnpm build
+      - name: Conformance on PostgreSQL
+        run: pnpm exec vitest run tests/conformance

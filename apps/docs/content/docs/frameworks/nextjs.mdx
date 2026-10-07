@@ -1,0 +1,171 @@
+---
+title: Next.js
+metaTitle: Better Files for Next.js
+description: Serve the protocol from one catch-all route, and call the API as the signed-in person from server components, server actions and route handlers.
+icon: Nextjs
+packages:
+  - '@better-files/next'
+  - '@better-files/client'
+  - '@better-files/react'
+sources:
+  - packages/next/src/index.ts
+  - examples/nextjs/lib/better-files.ts
+  - examples/nextjs/app/api/better-files/[...path]/route.ts
+  - examples/nextjs/app/rooms/[roomId]/page.tsx
+  - docs/guides/frameworks/nextjs.md
+---
+
+`better-files/next` targets the App Router. It serves the protocol from one catch-all route handler, and gives server
+components, server actions and route handlers the API bound to the signed-in person. It does not import Next itself,
+so it works across Next releases.
+
+## Setup
+
+<Steps>
+<Step>
+
+### Wrap the instance
+
+```ts title="lib/better-files.ts"
+import 'server-only';
+import { createIamNext } from 'better-iam/next';
+import { createBetterFilesNext } from 'better-files/next';
+import { dr, iam } from './better-files-instance';
+
+export { dr };
+export const iamNext = createIamNext(iam);
+export const drNext = createBetterFilesNext(dr, { iamNext });
+```
+
+`iamNext` is optional but recommended. With it, Better Files reads the request through Better IAM's Next helpers
+(Next's `headers()` and `cookies()`) and takes the tenant from the Better IAM session. Without it, pass
+`await headers()` yourself and give `tenantId` explicitly.
+
+</Step>
+<Step>
+
+### Mount the protocol
+
+```ts title="app/api/better-files/[...path]/route.ts"
+import { drNext } from '@/lib/better-files';
+
+export const runtime = 'nodejs'; // streamed uploads, encryption and storage need Node
+export const { GET, HEAD, POST, PUT, OPTIONS } = drNext.handlers();
+```
+
+The folder must match `basePath` on `betterFiles()`, which defaults to `/api/better-files`.
+
+</Step>
+<Step>
+
+### Read data in a server component
+
+```tsx title="app/rooms/[roomId]/page.tsx"
+import { redirect } from 'next/navigation';
+import { drNext } from '@/lib/better-files';
+
+export default async function RoomPage({ params }: { params: Promise<{ roomId: string }> }) {
+  const { roomId } = await params;
+  const context = await drNext.session(); // null when signed out
+  if (!context) redirect('/login');
+  const room = await context.tenant.rooms.get({ roomId }); // tenantId comes from the session
+  return <h1>{room.name}</h1>;
+}
+```
+
+</Step>
+</Steps>
+
+## The request context
+
+`drNext.session(headers?)` returns the signed-in person's context, or `null` when there is none, so a page can
+redirect. `drNext.request(headers?)` returns the same context but throws `UNAUTHENTICATED` instead of returning null.
+Both need `iamNext`.
+
+| Field        | What it is                                                                          |
+| ------------ | ----------------------------------------------------------------------------------- |
+| `tenantId`   | The tenant the Better IAM session acts in (for an assumed role, the role's tenant). |
+| `identityId` | The signed-in identity.                                                             |
+| `credential` | The request's cookies or token, for calls you make yourself.                        |
+| `tenant`     | The API with the session's tenant applied: `tenant.rooms.index({ roomId })`.        |
+| `api`        | The API bound to the credential, taking `tenantId` explicitly, for cross-tenant pages. |
+
+Without `iamNext`, bind the API to the request headers yourself:
+
+```ts
+import { headers } from 'next/headers';
+
+const api = drNext.api(await headers());
+const index = await api.rooms.index({ tenantId, roomId });
+```
+
+## Guarding a page on a document
+
+```tsx
+import { notFound } from 'next/navigation';
+
+const held = await drNext.capabilities(undefined, { roomId, nodeId, capabilities: ['VIEW'] });
+if (!held) notFound();
+```
+
+- The first argument is the request headers. Leave it `undefined` when `iamNext` reads them.
+- `tenantId` may be left out with `iamNext`, and then comes from the session.
+- `null` means the node is hidden or missing. A visible node without the capability throws `FORBIDDEN`.
+- `held` lists every capability the person has on the node, so you can show or hide download buttons without a
+  second call.
+
+## Server actions
+
+```ts title="app/rooms/[roomId]/actions.ts"
+'use server';
+import { revalidatePath } from 'next/cache';
+import { drNext } from '@/lib/better-files';
+
+export async function renameDocument(nodeId: string, name: string) {
+  const { tenant } = await drNext.request();
+  await tenant.documents.rename({ nodeId, name });
+  revalidatePath('/rooms');
+}
+```
+
+The operation checks both authorization layers itself, so the action needs no separate guard.
+
+## Client components
+
+Use the [typed client](/docs/frameworks/client) and the [React bindings](/docs/frameworks/react) in client
+components. Import the server type with `import type` only:
+
+```tsx title="lib/files.ts"
+'use client';
+import { createBetterFilesClient } from 'better-files/client';
+import { createBetterFilesReact } from 'better-files/react';
+import type { dr } from '@/lib/better-files-instance';
+
+export const files = createBetterFilesClient<typeof dr>({ tenantId: () => getTenantId() });
+export const { BetterFilesProvider, useFolder, useUpload, Can } = createBetterFilesReact<typeof dr>();
+```
+
+The client calls `/api/better-files` on the page's origin, and session cookies travel by default.
+
+## Maintenance on Vercel and similar hosts
+
+Run `dr.maintain()` from a cron route that only your scheduler can call:
+
+```ts title="app/api/cron/better-files/route.ts"
+import { dr } from '@/lib/better-files';
+
+export async function GET(request: Request) {
+  if (request.headers.get('authorization') !== `Bearer ${process.env.CRON_SECRET}`)
+    return new Response('Unauthorized', { status: 401 });
+  await dr.maintain();
+  return Response.json({ ok: true });
+}
+```
+
+<Callout type="info" title="Large files on serverless hosts">
+  Route handlers on serverless platforms have request body limits. Upload with `files.upload({ ..., direct: true })`:
+  the browser encrypts each part and sends it straight to S3-compatible storage. See
+  [direct uploads](/docs/frameworks/client#direct-uploads).
+</Callout>
+
+A complete example lives in `examples/nextjs` in the repository.

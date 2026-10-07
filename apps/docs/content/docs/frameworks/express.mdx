@@ -1,0 +1,97 @@
+---
+title: Express
+metaTitle: Better Files for Express and Connect
+description: One middleware serves the protocol with streamed bodies and adds req.betterFiles, with a capability guard and an error handler for your own routes.
+icon: Express
+packages:
+  - '@better-files/middleware'
+sources:
+  - packages/middleware/src/express.ts
+  - packages/middleware/src/index.ts
+  - examples/express-better-iam/server.ts
+  - docs/guides/frameworks/express.md
+---
+
+`better-files/middleware/express` works with Express 4 and 5, and with Connect.
+
+```ts title="server.ts"
+import express from 'express';
+import { createBetterFilesExpress } from 'better-files/middleware/express';
+import { dr } from './better-files';
+
+await dr.initialize();
+
+const app = express();
+const files = createBetterFilesExpress(dr);
+
+app.use(express.json());
+app.use(files.middleware); // the protocol under /api/better-files; req.betterFiles everywhere else
+
+app.get(
+  '/deals/:roomId/documents/:nodeId',
+  files.requireCapability(['VIEW'], {
+    tenantId: (req) => req.session.tenantId, // however your app knows the tenant
+    roomId: (req) => req.params.roomId,
+    nodeId: (req) => req.params.nodeId,
+  }),
+  async (req, res) => {
+    const document = await req.betterFiles!.api.documents.get({
+      tenantId: req.session.tenantId,
+      nodeId: req.params.nodeId,
+    });
+    res.json(document);
+  },
+);
+
+app.use(files.errorHandler); // after your routes
+app.listen(3000);
+```
+
+## What each piece does
+
+### middleware
+
+Answers every request under `basePath`. Uploads and downloads stream through untouched. It also works after
+`express.json()`: when a JSON parser has already read a protocol request's body, the middleware hands the parsed body
+to Better Files.
+
+Every other request gets `req.betterFiles`:
+
+| Field                                         | What it is                                         |
+| --------------------------------------------- | -------------------------------------------------- |
+| `credential`                                  | The request's cookies and bearer token.            |
+| `api`                                         | `dr.api` bound to that credential.                 |
+| `capabilities({ tenantId, roomId, nodeIds })` | Capability names per node, in one batched call.    |
+
+### requireCapability(capabilities, select)
+
+Checks the permission matrix on one node before your handler runs. The three selectors read the ids from the
+request. A refusal goes to `next(error)`, where `errorHandler` renders it.
+
+### errorHandler
+
+Renders Better Files and Better IAM errors as `{ error: { code, message } }` with the matching status (401, 403, 404,
+409, 423…). Anything that would be a 500, such as your own bugs, goes on to the next error handler.
+
+### helpers(req)
+
+Builds the same `{ credential, api, capabilities }` for a request the middleware did not see.
+
+## With Better IAM's Express helpers
+
+If your routes also use Better IAM directly, mount `createIamExpress(iam).middleware` from `better-iam/express` before
+the Better Files middleware. The two are independent, and Better Files reads the same cookies itself.
+
+## Maintenance
+
+```ts
+setInterval(
+  () => void dr.maintain().catch((error) => console.error('maintain failed', error)),
+  5 * 60_000,
+);
+```
+
+With several instances of your server, run it from one scheduler instead, or run
+`npx better-files maintain --every 300` as its own process.
+
+A complete example lives in `examples/express-better-iam` in the repository.

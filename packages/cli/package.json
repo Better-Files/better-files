@@ -1,0 +1,66 @@
+{
+  "name": "@better-files/cli",
+  "version": "0.1.0",
+  "description": "The better-files command line: migrate, maintain, verify, doctor, openapi and generate for a host's instance, and sync to mirror a room to a local folder",
+  "type": "module",
+  "license": "Apache-2.0",
+  "author": "Better Files contributors",
+  "homepage": "https://github.com/Better-Files/better-files/tree/main/packages/cli#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Better-Files/better-files.git",
+    "directory": "packages/cli"
+  },
+  "bugs": {
+    "url": "https://github.com/Better-Files/better-files/issues"
+  },
+  "keywords": [
+    "data-room",
+    "better-iam",
+    "typescript",
+    "cli",
+    "sync"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "bin": {
+    "better-files": "./dist/bin.js"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "sideEffects": false,
+  "scripts": {
+    "build": "tsc -b"
+  },
+  "dependencies": {
+    "@better-files/core": "workspace:*",
+    "@better-files/client": "workspace:*",
+    "@better-files/adapter-sql": "workspace:*"
+  },
+  "peerDependencies": {
+    "@better-files/server": "workspace:*"
+  },
+  "peerDependenciesMeta": {
+    "@better-files/server": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@better-files/server": "workspace:*"
+  }
+}

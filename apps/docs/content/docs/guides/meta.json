@@ -1,0 +1,16 @@
+{
+  "title": "Guides",
+  "description": "Concepts, setup, and the Better IAM integration",
+  "root": true,
+  "icon": "BookOpen",
+  "pages": [
+    "---Getting started---",
+    "index",
+    "quickstart",
+    "installation",
+    "faq",
+    "---Foundations---",
+    "concepts",
+    "better-iam"
+  ]
+}

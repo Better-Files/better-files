@@ -1,0 +1,214 @@
+---
+title: Watermarking
+description: Stamp downloaded and viewed PDFs and images with who received them, hide a forensic code in each copy, and trace a leaked copy back.
+metaTitle: Watermarked downloads and leak tracing
+icon: Stamp
+packages: ['@better-files/plugin-watermark']
+sources:
+  - packages/plugin-watermark/src/index.ts
+  - packages/plugin-watermark/src/forensic.ts
+  - packages/plugin-watermark/README.md
+  - packages/plugin-watermark/package.json
+  - packages/core/src/plugin.ts
+  - packages/server/src/files.ts
+  - tests/plugins/watermark-forensic.test.ts
+  - tests/plugins/nda-watermark.test.ts
+---
+
+Most people in a data room should never get a clean copy of a confidential file. When a document does leak, the deal
+team wants to know whose copy it was. A visible stamp with the recipient's name discourages sharing, and a hidden
+code that survives removal of the stamp names the source when a copy surfaces anyway.
+
+The watermark plugin serves the `watermarked` download variant and the inline `view` variant. It stamps PDFs and
+images with the recipient's email (or name), the time, their IP address and a forensic code unique to the copy. It
+hides the same code in the file, and records every copy before it is served.
+
+```ts
+import { betterFiles } from 'better-files';
+import { betterFilesIamPlugin } from 'better-files/iam';
+import { watermarkPlugin } from 'better-files/plugin-watermark';
+
+const plugins = [watermarkPlugin()] as const;
+const iamPlugin = betterFilesIamPlugin({ plugins }); // registers the better-files:watermark:* actions
+
+export const dr = betterFiles({ /* iam, database, storage, secret */ plugins });
+```
+
+The plugin owns the `watermarkIssues` table; on a SQL database, run `better-files generate` and
+`better-files migrate` after adding it. Image stamping needs the optional `sharp` package; PDFs need nothing extra.
+
+## Which files are stamped
+
+People ask for copies through the core endpoints: `documents.requestDownload` (the `watermarked` variant),
+`documents.requestView` (the `view` variant) and `folders.requestDownload` (a ZIP, `watermarked` by default). When
+the download ticket is redeemed, the plugin reads the file and checks its first bytes, not only its declared type:
+
+| File | What the recipient gets |
+| --- | --- |
+| PDF | the PDF, stamped on every page |
+| PNG, JPEG, WebP | the image, stamped, in the same format |
+| anything else, with a PDF rendition | the rendition, stamped, named `<name>.pdf` |
+| anything else | refused with `UNSUPPORTED` |
+
+A PDF rendition of an Office file comes from the [processing plugin](/docs/plugins/processing). People who may only
+have watermarked copies never get the unmarked original: a variant no plugin can produce is refused. In a folder
+ZIP, a file that cannot be stamped is left out with a note.
+
+## The visible stamp
+
+The default line is `{email or name} · {time} UTC · {ip} · {code}`, tiled at an angle across every page or image.
+The font shrinks until one whole line fits the page, one copy sits in the middle, and staggered copies cover the rest,
+so cropping one copy leaves others. The time is when the ticket was redeemed; the IP address is the one the ticket
+was issued to.
+
+<TypeTable
+  type={{
+    text: {
+      type: '(context: WatermarkContext) => string',
+      description: 'The stamped text. The context has name, email, ip, time (ISO), room, filename and code.',
+      default: '{email or name} · {time} UTC · {ip} · {code}',
+    },
+    opacity: { type: 'number', description: 'From 0 to 1.', default: '0.18' },
+    fontSize: { type: 'number', description: 'The largest font size used on PDFs, in points.', default: '28' },
+    angle: { type: 'number', description: 'Degrees counter-clockwise.', default: '35' },
+    color: {
+      type: '[number, number, number]',
+      description: 'RGB, each from 0 to 1.',
+      default: '[0.35, 0.35, 0.4]',
+    },
+    maxBytes: {
+      type: 'number',
+      description: 'The largest file stamped in memory, in bytes. Larger files are refused with PAYLOAD_TOO_LARGE.',
+      default: '200 MiB',
+    },
+    view: {
+      type: 'boolean',
+      description: 'Also serve the inline view variant, watermarked.',
+      default: 'true',
+    },
+    forensic: {
+      type: 'false | { strength?: number }',
+      description: 'Hidden marks. strength is the image mark step in luma levels, 2 to 64. false stamps visibly only.',
+      default: '{ strength: 8 }',
+    },
+    record: {
+      type: 'boolean',
+      description: 'Record every copy in the watermarkIssues table, for trace, issues and identify.',
+      default: 'true',
+    },
+  }}
+/>
+
+A `forensic.strength` outside 2 to 64 throws `INVALID_INPUT` when the plugin is created. With `view: false`, the
+plugin leaves the `view` variant to other plugins; if none produces it, viewing is refused with `UNSUPPORTED`.
+
+```ts
+watermarkPlugin({
+  text: ({ email, name, time, code }) => `CONFIDENTIAL · ${email || name} · ${time} · ${code}`,
+  opacity: 0.25,
+});
+```
+
+## Forensic codes
+
+Each copy gets a fresh code of ten hexadecimal digits, drawn at random, so codes cannot be guessed. Besides the
+visible stamp, the code is hidden where removing the stamp does not reach it. Every hidden payload carries a
+checksum, so random content is not mistaken for a mark.
+
+- **PDFs:** in the document keywords, and as invisible text on every page. Stripping the metadata leaves the text.
+- **Images:** in the average brightness of a grid of cells across the picture. The mark survives JPEG re-compression
+  (down to quality 40 in tests), conversion between PNG and WebP, mild blur, and resizing of ordinary photos.
+  Cropping, rotation, brightness or contrast changes and heavy editing defeat it. Images under 64 × 56 pixels carry
+  the visible stamp only. On flat artwork the mark can show as a faint texture; a lower `strength` shows less, a
+  higher one survives harsher processing.
+
+With `record` on, each copy is written to `watermarkIssues` before it leaves the server, so a copy that cannot be
+traced is not served. A `WatermarkIssue` holds the room, document (`nodeId`), version, `code`, recipient
+(`identityId`, `name`, `email`), `ip`, `variant`, `filename`, `mimeType`, whether the hidden mark was embedded
+(`hidden`) and `createdAt`.
+
+## Trace a leaked copy
+
+```ts
+// The leaked file was uploaded to the room (a restricted folder works well): read its code and whose copy it was.
+const found = await dr.api.watermark.identify(credential, { tenantId, nodeId });
+// { versionId, code, method: 'pdf-metadata' | 'pdf-text' | 'image-pixels', issue, otherRoom }
+
+// A code from anywhere in the tenant.
+const issue = await dr.api.watermark.trace(credential, { tenantId, code: '3F6B7D6E42' });
+
+// The copies handed out in a room, newest first.
+const issues = await dr.api.watermark.issues(credential, { tenantId, roomId, nodeId, identityId });
+```
+
+| Endpoint | Target | Action | Who (access model) |
+| --- | --- | --- | --- |
+| `trace` | tenant | `better-files:watermark:trace` | decided by your Better IAM policies |
+| `issues` | room | `better-files:watermark:read` | owners, admins, auditors |
+| `identify` | document | `better-files:watermark:trace`, plus `MANAGE` on the document | owners, admins |
+
+- `trace` takes a `code` (ten hex digits, any case) and returns the `WatermarkIssue`, or `NOT_FOUND`. It is a tenant
+  operation, authorized on the tenant (`iam/{tenantId}`) rather than on a room, so the room access model does not
+  grant it. Allow `better-files:watermark:trace` on the tenant to the people who investigate leaks, typically tenant
+  administrators, in a Better IAM policy.
+- `issues` takes `roomId` and optionally `nodeId`, `identityId`, `code` and `limit` (1 to 1,000, default 100).
+- `identify` takes a document `nodeId` and optionally a `versionId` (the current version by default). The version must
+  be `ready`, or the call fails with `CONFLICT`. It returns `code: null` when no mark is found. For a copy issued in
+  another room it returns `issue: null` and `otherRoom: true`, and leaves the lookup to `trace`.
+
+The browser client has the same calls as `client.watermark.<endpoint>(input)`, and HTTP clients use
+`POST /api/better-files/watermark/<endpoint>`.
+
+Outside any request, for files you hold (a command-line tool, a scheduled scan), read the code directly:
+
+```ts
+import { extractForensicCode } from 'better-files/plugin-watermark';
+
+const match = await extractForensicCode(bytes); // { code, method } | undefined
+// Pass { strength } when the plugin uses a strength other than 8.
+```
+
+`embedInPixels` and `extractFromPixels` (the image mark on raw pixels) and `tileStamp` (the stamp layout) are
+exported as well.
+
+## Permissions
+
+Watermarking itself is decided by the permission matrix (layer A): a person with `DOWNLOAD_WATERMARKED` but not
+`DOWNLOAD_ORIGINAL` on a document can only ever get a stamped copy, and `VIEW` gives the stamped `view` variant. The
+plugin removes no capabilities.
+
+The tracing endpoints are authorized in Better IAM (layer B) on the two actions above. Pass the plugin to
+`betterFilesIamPlugin` so they join the permission catalog. `identify` also needs `MANAGE` on the document in the
+matrix, because it reads the content of the uploaded copy.
+
+## Activity and events
+
+- Every stamped copy emits `document.watermarked` with `nodeId`, `versionId`, `principalId`, `code`, `variant` and
+  `hidden`. The download itself is in the activity log as `document.downloaded` or `document.viewed`, written by the
+  core.
+- Every identification writes `watermark.identified` to the room's activity log, with the `code`, the `method`, and
+  the `recipientId` when the copy was issued in that room.
+
+## Errors
+
+| Code | When |
+| --- | --- |
+| `UNSUPPORTED` | the file type cannot be stamped and there is no PDF rendition, or an image arrives without `sharp` installed |
+| `PAYLOAD_TOO_LARGE` | the file, or its rendition, is larger than `maxBytes` |
+| `NOT_FOUND` | `trace` finds no copy with that code, or `identify` finds no version |
+| `INVALID_INPUT` | `identify` on a folder, or a bad `forensic.strength` |
+| `CONFLICT` | `identify` on a version that is not `ready` |
+
+## Limits
+
+- Files are stamped in memory, up to `maxBytes`.
+- Only PDFs and PNG, JPEG and WebP images are stamped. Other formats need a PDF rendition.
+- No watermark prevents screenshots or photos of a screen. The visible stamp discourages them and names the source
+  when they surface.
+
+## Related
+
+- [NDA gating](/docs/plugins/nda)
+- [Share links](/docs/plugins/links): link visitors get copies stamped with the email they gave.
+- [Processing](/docs/plugins/processing): PDF renditions of Office files.
+- [Download guard](/docs/plugins/guard): rate limits on downloads.

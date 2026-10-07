@@ -1,0 +1,186 @@
+---
+title: Share links
+description: Secret URLs for one document or folder, with an optional password, email capture, expiry and use cap, logged in the room's activity.
+metaTitle: Share links with passwords and expiry
+icon: Link2
+packages: ['@better-files/plugin-links']
+sources:
+  - packages/plugin-links/src/index.ts
+  - packages/plugin-links/README.md
+  - packages/core/src/plugin.ts
+  - packages/core/src/operations.ts
+  - packages/server/src/pipeline.ts
+  - packages/server/src/files.ts
+  - tests/plugins/links.test.ts
+  - tests/plugins/links-creator.test.ts
+---
+
+Sometimes a file has to reach someone who is not a room participant: a lender's counsel who needs one report, or an
+expert who needs one folder for a week. Inviting them as a guest is heavy for that. A **share link** is a secret URL
+for one document or folder that works without an account, like a Dropbox link.
+
+Links are off until a room administrator turns them on for the room. A link carries at most viewing and downloading,
+never more than its creator holds, and it stops working when the room closes. Every open and download lands in the
+room's activity log with the email the visitor gave.
+
+```ts
+import { betterFiles } from 'better-files';
+import { betterFilesIamPlugin } from 'better-files/iam';
+import { linksPlugin } from 'better-files/plugin-links';
+
+const plugins = [linksPlugin()] as const;
+const iamPlugin = betterFilesIamPlugin({ plugins }); // registers the better-files:links:* actions
+
+export const dr = betterFiles({ /* iam, database, storage, secret */ plugins });
+
+// A room administrator turns links on for the room.
+await dr.api.links.configure(credential, { tenantId, roomId, enabled: true });
+
+// A participant shares a folder for 7 days, behind a password, asking for the visitor's email.
+const link = await dr.api.links.create(credential, {
+  tenantId,
+  nodeId: folderId,
+  capabilities: ['VIEW', 'DOWNLOAD_WATERMARKED'],
+  password: 'correct horse battery',
+  requireEmail: true,
+  expiresInDays: 7,
+});
+// link.token is shown once: build your URL from it, for example https://app.example.com/s/<token>.
+```
+
+The plugin owns the `shareLinks` and `linkSessions` tables and adds a `linksEnabled` field to rooms; on a SQL
+database, run `better-files generate` and `better-files migrate` after adding it.
+
+## Options
+
+<TypeTable
+  type={{
+    sessionTtlMs: {
+      type: 'number',
+      description: 'How long a visitor session lasts after opening a link, in milliseconds.',
+      default: '2 hours',
+    },
+    maxDays: {
+      type: 'number',
+      description: 'The longest lifetime a creator may choose, in days. Longer requests are cut to this.',
+      default: '90',
+    },
+    requiredCapability: {
+      type: "'MANAGE' | 'DOWNLOAD_ORIGINAL' | 'DOWNLOAD_WATERMARKED' | 'VIEW'",
+      description: 'The capability a creator must hold on the item to share it. DOWNLOAD_ORIGINAL lets anyone who may take the original share it.',
+      default: "'MANAGE'",
+    },
+  }}
+/>
+
+## Manage links
+
+These calls take a credential. In the browser they are on the client as `client.links.<endpoint>(input)`, and over
+HTTP at `POST /api/better-files/links/<endpoint>`.
+
+| Endpoint | Target | Action | Who (access model) |
+| --- | --- | --- | --- |
+| `configure` | room | `better-files:links:manage` | owners, admins, publishers; then see below |
+| `create` | document or folder | `better-files:links:create`, plus `requiredCapability` on the item | owners, admins, publishers, editors, contributors, viewers |
+| `list` | room | `better-files:links:manage` | owners, admins, publishers |
+| `disable` | room of the link | `better-files:links:manage` | owners, admins, publishers |
+
+- **`configure`** takes `{ roomId, enabled }`. Besides the action, the caller must hold `MANAGE` on the room's root
+  folder or be the room's owner, or the call fails with `FORBIDDEN`. Turning links off stops every existing link at
+  once; turning them back on revives links that have not expired or been disabled.
+- **`create`** takes the item's `nodeId` and `capabilities`, one to three of `VIEW`, `DOWNLOAD_WATERMARKED` and
+  `DOWNLOAD_ORIGINAL`. `LIST` is always added. Optional: `password` (8 to 200 characters, stored as a scrypt hash),
+  `requireEmail`, `expiresInDays` (default and maximum `maxDays`) and `maxUses` (1 to 100,000). Every link expires.
+  It returns the link with its `token`, the capability names, and `password: true` when it has one. The token is
+  shown only here; only its SHA-256 hash is stored.
+- **`list`** takes `{ roomId }` and returns the room's links, newest first, without tokens or password hashes: `id`,
+  `nodeId`, `capabilities`, `password`, `requireEmail`, `expiresAt`, `maxUses`, `uses`, `disabledAt`, `createdBy`,
+  `lastUsedAt` and `createdAt`.
+- **`disable`** takes `{ linkId }`. It stops the link for good and ends its open visitor sessions.
+
+`list` and `disable` also work on closed rooms.
+
+## What visitors call
+
+Visitors have no account. Three **public** endpoints take no credential and skip both authorization layers; each
+checks the link's own secret instead. Pass an empty credential on the server:
+
+```ts
+// 1. Exchange the token (and the password or email, when the link needs them) for a visitor session.
+const opened = await dr.api.links.open({}, { tenantId, token, password, email });
+// { session, expiresAt, room: { id, name }, item: { id, kind, name, updatedAt }, capabilities }
+
+// 2. List a shared folder, or a subfolder inside it.
+const { item, items } = await dr.api.links.browse({}, { tenantId, session: opened.session, nodeId });
+
+// 3. Get a ticket for a document inside the link: 'view', 'watermarked' or 'original'.
+const ticket = await dr.api.links.download({}, { tenantId, session: opened.session, nodeId, variant: 'view' });
+// { url, token, expiresAt }
+```
+
+From a browser, call `POST /api/better-files/links/open` (and `browse`, `download`) with a JSON body that includes
+`tenantId`; no cookie or authorization header is needed.
+
+- **`open`** fails with `UNAUTHENTICATED` when the link needs a password that is missing or wrong
+  (`details: { password: true }`), or an email that is missing (`details: { email: true }`). Each successful open counts one
+  use, and the open after `maxUses` is refused. The visitor session lasts `sessionTtlMs`.
+- **`browse`** lists the items of a folder the link covers, with document sizes. For a shared document it returns the
+  document and no items.
+- **`download`** issues a download or viewer ticket for the visitor. The copy is made out to them: with the
+  [watermark plugin](/docs/plugins/watermark), it is stamped with the email they gave (or `Link visitor`).
+
+A missing, disabled, expired or used-up link, a room that is not live, links turned off for the room, or an item
+outside the link all answer `NOT_FOUND`, so a visitor cannot tell which.
+
+## What a link reaches
+
+A link never carries more than its creator holds, now as well as when it was made:
+
+- At `create`, the link's capabilities must be a subset of what the creator holds on the item, or the call fails with
+  `FORBIDDEN` (`A link cannot carry more than you hold`).
+- On every visitor request, the link's capabilities are cut down to what the creator holds today in the room's
+  permission matrix. Items hidden from the creator stay hidden from visitors. Narrowing the creator narrows their
+  links; removing, suspending or expiring their membership stops them. Room owners and administrators, directly or
+  through a group, hold everything.
+- A creator who is not on the room roster holds access through a tenant-wide role in Better IAM, which a visitor's
+  request cannot check. Their links keep the capabilities checked when they were made.
+- Room settings still apply at `download`: when downloads are disabled in the room, or the document is view-only,
+  only `view` is served.
+
+## Activity and events
+
+| Activity entry | When | Metadata |
+| --- | --- | --- |
+| `links.enabled`, `links.disabled` | `configure` |  |
+| `link.created` | `create` | `linkId`, `capabilities`, `password`, `expiresAt` |
+| `link.disabled` | `disable` | `linkId` |
+| `link.opened` | a visitor opens the link | `linkId`, `email`, `ip` |
+| `document.viewed`, `document.downloaded` | a visitor gets a ticket | `linkId`, `variant`, `email` |
+
+`create` also emits the `link.created` event (`linkId`, `nodeId`) to `dr.events` subscribers and webhooks.
+
+## Errors
+
+| Code | When |
+| --- | --- |
+| `FORBIDDEN` | links are off for the room, the link would carry more than the creator holds, `configure` without room administration, or a variant the link does not carry |
+| `UNAUTHENTICATED` | a password or email is needed at `open`, or the visitor session expired or its link was disabled |
+| `NOT_FOUND` | the link or item cannot be used, for any reason above |
+| `INVALID_INPUT` | a malformed email, a short password, or values out of range |
+
+## Limits
+
+- A link shares one document or folder, with view and download rights only. Visitors cannot upload, edit or see
+  the rest of the room.
+- `maxUses` counts opens, not downloads. One visitor session can download as often as its link allows until it
+  expires.
+- Visitor requests do not pass through other plugins' `beforeDownload` hooks or capability clamps: the
+  [download guard](/docs/plugins/guard)'s rate limit and [network rules](/docs/plugins/network) do not apply to
+  them, and the [NDA](/docs/plugins/nda) does not gate them. Turn links off in rooms where those controls must hold.
+- Expired visitor sessions are not deleted by the plugin.
+
+## Related
+
+- [Watermarking](/docs/plugins/watermark)
+- [NDA gating](/docs/plugins/nda)
+- [Better IAM integration](/docs/guides/better-iam)

@@ -1,0 +1,167 @@
+---
+title: Legal holds and retention
+description: Legal holds and minimum retention periods that stop documents, folders and rooms from being deleted, purged or moved out of scope.
+metaTitle: Legal holds and retention rules
+icon: Scale
+packages: ['@better-files/plugin-retention']
+sources:
+  - packages/plugin-retention/src/index.ts
+  - packages/plugin-retention/README.md
+  - packages/server/src/index.ts
+  - packages/server/src/engine.ts
+  - packages/server/src/pipeline.ts
+  - packages/core/src/errors.ts
+  - tests/plugins/retention-rules.test.ts
+  - tests/plugins/retention-export.test.ts
+---
+
+When litigation or an investigation is expected, a company must preserve the relevant records: nobody may delete
+them, not even by accident, until counsel says so. That is a **legal hold**. Separately, records policies and
+regulators often require keeping documents for a minimum time, such as seven years for books and records. That is a
+**retention rule**.
+
+The retention plugin adds both. A hold preserves a whole room or one folder's subtree until it is released. A rule
+keeps every document in its scope for a number of days after the document was added. Either way, Better Files asks
+the plugin before every destructive step, and refuses with `LEGAL_HOLD` when something covered would be lost.
+
+```ts
+import { betterFiles } from 'better-files';
+import { betterFilesIamPlugin } from 'better-files/iam';
+import { retentionPlugin } from 'better-files/plugin-retention';
+
+const plugins = [retentionPlugin({ closedRoomRetentionDays: 365 * 7 })] as const;
+const iamPlugin = betterFilesIamPlugin({ plugins }); // registers better-files:holds:manage
+
+export const dr = betterFiles({ /* iam, database, storage, secret */ plugins });
+
+await dr.api.retention.place(credential, {
+  tenantId,
+  roomId,
+  nodeId: contractsFolderId, // leave out to hold the whole room
+  name: 'Smith v. Acme',
+  reason: 'Litigation hold requested by outside counsel',
+});
+
+await dr.api.retention.addRule(credential, {
+  tenantId,
+  roomId,
+  name: 'Books and records',
+  keepDays: 2555,
+  locked: true,
+});
+```
+
+The plugin owns two tables, `legalHolds` and `retentionRules`, and adds a `retentionNotifiedAt` field to rooms. On a
+SQL database, run `better-files generate` and `better-files migrate` after adding it.
+
+## What is protected
+
+Content is covered when a hold or a rule applies to it:
+
+- A **hold** without `nodeId` covers the whole room. A hold with `nodeId` covers that folder or document and
+  everything under it.
+- A **rule** covers the documents in its scope (the whole room, or the subtree under `nodeId`) until `keepDays` have
+  passed since each document was created. New versions do not restart the period.
+
+While covered, these are refused with `LEGAL_HOLD` (HTTP 409):
+
+- Deleting a covered folder or document.
+- Deleting the room, when anything in it is covered.
+- Moving a covered item somewhere outside the hold or rule. Moves within the covered folder, and moves into it, are
+  allowed.
+
+Covered items that were already in the trash stay there: `dr.maintain()` skips them when it purges expired trash,
+until the hold is released or the retention period ends.
+
+The error message names the reason, for example `Legal hold "Smith v. Acme" preserves these items` or
+`Retention rule "Books and records" keeps "ledger.pdf" until 2032-05-01`.
+
+## Endpoints
+
+All six endpoints are in the `retention` group: `dr.api.retention.<name>(credential, input)` on the server, and
+`client.retention.<name>(input)` on the [typed client](/docs/frameworks/client). Every input also takes `tenantId`.
+All of them work in closed and archived rooms.
+
+| Endpoint | Input | Returns |
+| --- | --- | --- |
+| `place` | `roomId`, `nodeId?`, `name` (1 to 200 characters), `reason` (1 to 2000) | The new hold. |
+| `release` | `holdId` | The hold, with `releasedAt` and `releasedBy`. |
+| `list` | `roomId`, `includeReleased?` | The room's active holds, oldest first; released ones too with `includeReleased`. |
+| `addRule` | `roomId`, `nodeId?`, `name` (1 to 200), `keepDays` (whole number, 1 to 36500), `locked?` | The new rule. |
+| `removeRule` | `ruleId` | The rule, with `removedAt` and `removedBy`. |
+| `listRules` | `roomId`, `includeRemoved?` | The room's active rules, oldest first; removed ones too with `includeRemoved`. |
+
+Releasing a hold and removing a rule keep the record, so you can always list what was in force. A **locked** rule
+cannot be removed at all: `removeRule` answers `LEGAL_HOLD`. Use it for write-once records policies, and only when
+you mean it.
+
+## Permissions
+
+Every endpoint, including the two list endpoints, needs `better-files:holds:manage` on the room. The plugin grants it
+to the room's `owner` and `admin` relations. Pass the plugin to `betterFilesIamPlugin({ plugins })` so Better IAM
+knows the action; to let a compliance team manage holds across rooms, grant it to them in a
+[Better IAM](/docs/guides/better-iam) policy.
+
+## Activity and events
+
+Each change is recorded in the room's activity log and published as an event:
+
+| Activity and event | Metadata |
+| --- | --- |
+| `hold.placed` | `holdId`, `name` (and the held `nodeId` on the activity record) |
+| `hold.released` | `holdId` (`name` too on the activity record) |
+| `retention.rule-added` | `ruleId`, `name` (`keepDays` and `locked` too on the activity record) |
+| `retention.rule-removed` | `ruleId` (`name` too on the activity record) |
+
+## Closed rooms
+
+With `closedRoomRetentionDays`, `dr.maintain()` publishes `room.retention-expired` once for each closed or archived
+room that has not been updated for that many days, so your application can export and delete it under your records
+policy. The event data is `roomId`, `name` and `closedAt`.
+
+A room with an active hold, or with documents a rule still keeps, is not notified yet; it is checked again on every
+run and notified once nothing keeps it. The plugin never deletes a room itself.
+
+<Callout type="info">
+  `closedAt` is the room's `updatedAt`. Any later change to a closed room restarts the count.
+</Callout>
+
+## Options
+
+<TypeTable
+  type={{
+    closedRoomRetentionDays: {
+      type: 'number',
+      description: 'Days after a room closes before dr.maintain() publishes room.retention-expired for it, once.',
+      default: 'no schedule',
+    },
+    clock: {
+      type: '{ now(): number }',
+      description: 'Time source for retention rules. In tests, pass the clock you gave betterFiles().',
+      default: 'Date',
+    },
+  }}
+/>
+
+## Errors
+
+| Code | When |
+| --- | --- |
+| `LEGAL_HOLD` (409) | A delete, purge, room deletion or move would lose covered content, or `removeRule` was called on a locked rule. |
+| `CONFLICT` (409) | The hold was already released, or the rule was already removed. |
+| `NOT_FOUND` (404) | The hold, rule, room or `nodeId` does not exist in the tenant (or the node is in another room). |
+| `FORBIDDEN` (403) | The caller lacks `better-files:holds:manage` on the room. |
+
+## Limits
+
+- Holds and rules belong to one room. To hold the same matter across rooms, place one hold per room.
+- Rules count from when the document was added to the room, not from when it was last changed.
+- Holds and rules stop deletion inside Better Files. They do not stop someone with direct access to your database or
+  storage bucket.
+
+## Related
+
+- [Access reviews](/docs/plugins/reviews)
+- [Audit](/docs/plugins/audit)
+- [Better IAM](/docs/guides/better-iam)
+- [Error codes](/docs/reference/errors)

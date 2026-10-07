@@ -1,0 +1,59 @@
+---
+title: Managed records
+description: The Better IAM records Better Files manages, the guard that refuses changes made around it, and bypassBetterFilesGuard for repairs.
+icon: ShieldHalf
+packages: ['@better-files/iam']
+sources:
+  - packages/iam/src/hooks.ts
+  - packages/iam/src/index.ts
+---
+
+Some facts live in both systems. A room is a row in Better Files and a registered resource in Better IAM; a room role
+is a member record in Better Files and a relationship tuple in Better IAM. Better Files keeps the two in step by making
+every change through its own API. A change made directly in Better IAM, by an administrator in your admin UI or a
+script, would skip Better Files' side, and the two would disagree about who is in a room.
+
+So `betterFilesIamPlugin()` **guards** those records. With the guard on (the default), Better IAM refuses these
+changes unless Better Files makes them:
+
+| Change | Why it is refused |
+| --- | --- |
+| Creating, updating or deleting a `better-files-room`, `-folder` or `-document` resource, or its relations | Rooms and room roles must change through Better Files |
+| Updating or deleting the **Better Files participant** role, or deleting one of its bindings | The role is what turns room relations into access |
+| Deleting a group that holds a relation on a room | The group gives people access to a data room |
+| Deleting or renaming the **Better Files outsiders** group | It would turn every outsider into a full member |
+
+A refused change fails with the Better IAM error code `BETTER_FILES_MANAGED` (HTTP 409) and a message naming the
+record. Adding someone to or removing someone from the outsiders group is allowed.
+
+## Repairs and migrations
+
+To change these records directly, for a data repair or a migration script, run the change inside
+`bypassBetterFilesGuard`:
+
+```ts
+import { bypassBetterFilesGuard } from 'better-files/iam';
+
+await bypassBetterFilesGuard(() =>
+  iam.api.relationships.delete(admin, { tenantId, relationshipId }),
+);
+```
+
+The bypass lasts for that call and anything it awaits, and nothing else. Better Files' own writes run inside it, which
+is how they pass the guard. After a repair, check that the two systems agree: `better-files reconcile` compares
+room roles and groups in Better IAM with Better Files' records and reports or repairs the drift. See the
+[CLI](/docs/operations/cli).
+
+To turn the guard off entirely, pass `guard: false` to `betterFilesIamPlugin()`.
+
+## Cached ids follow Better IAM
+
+The integration caches the ids it looks up once per tenant: the participant role, the outsiders group, the tenant key.
+When you give it the plugin (`betterIamIntegration(iam, { iamPlugin })`), those caches follow Better IAM's audit
+events, so deleting one of those records, or purging a tenant, makes the integration look it up again instead of using
+a stale id.
+
+## Related
+
+- [Access model](/docs/guides/better-iam/access-model): the participant role and room relations.
+- [Outsiders](/docs/guides/better-iam/outsiders): the outsiders group.

@@ -1,0 +1,28 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": "src",
+    "outDir": "dist"
+  },
+  "include": ["src/**/*.ts"],
+  "references": [
+    {
+      "path": "../core"
+    },
+    {
+      "path": "../adapter-sql"
+    },
+    {
+      "path": "../adapter-sqlite"
+    },
+    {
+      "path": "../adapter-postgres"
+    },
+    {
+      "path": "../adapter-libsql"
+    },
+    {
+      "path": "../adapter-pglite"
+    }
+  ]
+}

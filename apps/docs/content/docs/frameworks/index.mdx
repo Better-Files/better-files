@@ -1,0 +1,155 @@
+---
+title: Frameworks
+description: What every framework integration does for you, how they compare, and the one instance they all share.
+icon: Layers
+packages:
+  - '@better-files/middleware'
+  - '@better-files/next'
+  - '@better-files/nestjs'
+  - '@better-files/svelte'
+  - '@better-files/client'
+  - '@better-files/react'
+  - '@better-files/vue'
+sources:
+  - README.md
+  - packages/middleware/src/index.ts
+  - packages/server/src/http.ts
+  - packages/server/src/options.ts
+  - docs/guides/README.md
+---
+
+Better Files runs inside your own server. You create one `betterFiles()` instance and mount it into the framework
+your app already uses. No integration has its own permission model, storage or audit trail. Each one reads the
+request the way its framework exposes it and calls the same instance. A Next.js page, a NestJS controller and an
+Express route therefore enforce the same permission matrix and the same Better IAM decisions, and they write to the
+same activity log.
+
+## What every integration does
+
+Each server integration gives you the same three things, shaped to the framework's conventions:
+
+<Steps>
+<Step>
+
+### The protocol
+
+The integration serves the Better Files HTTP protocol under `basePath` (default `/api/better-files`):
+
+- JSON operations as `POST {basePath}/{group}/{method}`;
+- streamed, resumable uploads;
+- file tickets for downloads and the viewer;
+- live room activity as Server-Sent Events.
+
+The browser client, the React, Vue and Svelte bindings, the `<bf-viewer>` element, `better-files sync` and the MCP
+tools all talk to this endpoint. Upload and download bodies are streamed, so mount the protocol where your framework
+has not read the body yet. Express and Koa also accept a JSON body that a parser already read.
+
+</Step>
+<Step>
+
+### The bound API
+
+Your own routes, pages and actions call `dr.api` as the signed-in person. The integration takes the request's cookies
+or bearer token (what Better IAM reads) and binds them as the credential, so you write
+`api.documents.get({ tenantId, nodeId })`. Every call still passes both authorization layers, the permission matrix
+and the Better IAM decision. No call runs as "the server".
+
+</Step>
+<Step>
+
+### A capability guard
+
+A guard checks the permission matrix on one folder or document, such as `['VIEW']` or `['DOWNLOAD_ORIGINAL']`, before
+your handler runs. A node the person cannot `LIST` answers 404, so its existence does not leak. A node they can see
+but not use answers 403. Use guards around your own pages and handlers. Better Files operations already check for
+themselves.
+
+</Step>
+</Steps>
+
+## Pick an integration
+
+| Stack                                      | Import (`better-files/…`) | Protocol                             | Bound API                       | Guard                                                      |
+| ------------------------------------------ | ------------------------- | ------------------------------------ | ------------------------------- | ---------------------------------------------------------- |
+| [Next.js](/docs/frameworks/nextjs)         | `next`                    | catch-all route handlers             | `drNext.request()`, `.api()`    | `drNext.capabilities()`                                    |
+| [Nuxt, Nitro, h3](/docs/frameworks/nuxt)   | `middleware/h3`           | catch-all server route               | `bindApi(dr, credential)`       | `requireCapabilities()`                                    |
+| [SvelteKit](/docs/frameworks/sveltekit)    | `svelte/kit`              | `handle` hook or `+server.ts`        | `bindApi(dr, credential)`       | `requireCapabilities()`                                    |
+| [React Router, Remix](/docs/frameworks/react-router) | `middleware/react-router` | resource route                | `drRouter.helpers()`            | `drRouter.guard()`, `.action()`                            |
+| [NestJS](/docs/frameworks/nestjs)          | `nestjs`                  | `BetterFilesModule` (Express)        | `@BetterFilesApi()`, service    | `@RequireCapability`                                       |
+| [Express, Connect](/docs/frameworks/express) | `middleware/express`    | `middleware`                         | `req.betterFiles.api`           | `requireCapability()`                                      |
+| [Fastify](/docs/frameworks/fastify)        | `middleware/fastify`      | `onRequest` hook                     | `request.betterFiles.api`       | `requireCapability()` as `preHandler`                      |
+| [Hono](/docs/frameworks/hono)              | `middleware/hono`         | `handler`                            | `c.get('betterFiles').api`      | `requireCapability()`                                      |
+| [Koa](/docs/frameworks/koa)                | `middleware/koa`          | `middleware`                         | `ctx.state.betterFiles.api`     | `requireCapability()`                                      |
+| [Bun, Deno, workers](/docs/frameworks/fetch) | (none)                  | `dr.handler`                         | `bindApi(dr, credential)`       | `requireCapabilities()`                                    |
+
+On the browser side, the [typed client](/docs/frameworks/client) works with any of them. The
+[React](/docs/frameworks/react), [Vue](/docs/frameworks/vue) and [Svelte](/docs/frameworks/svelte) bindings add a
+shared query cache, upload progress, live rooms and a capability-aware `Can`.
+
+## One instance per process
+
+Create the instance once, in a server-only module the rest of your app imports:
+
+```ts title="server/better-files.ts"
+import { betterFiles } from 'better-files';
+import { betterIamIntegration, betterFilesIamPlugin } from 'better-files/iam';
+import { postgresAdapter } from 'better-files/adapter-postgres';
+import { s3Storage } from 'better-files/storage-s3';
+import { iam } from './iam';
+
+const plugins = [] as const;
+export const iamPlugin = betterFilesIamPlugin({ plugins });
+
+export const dr = betterFiles({
+  iam: betterIamIntegration(iam, { iamPlugin, systemCredential }),
+  database: postgresAdapter({ pool }),
+  storage: s3Storage({ bucket: 'rooms', region: 'eu-west-1', credentials }),
+  secret: process.env.BETTER_FILES_SECRET!,
+  plugins,
+});
+```
+
+Then, whatever the framework:
+
+- **Migrate at deploy time.** `await dr.initialize()`, or `npx better-files migrate`, creates and updates the tables.
+- **Schedule maintenance.** Call `await dr.maintain()` every few minutes from a cron route, a scheduler, or
+  `npx better-files maintain --every 300`. It expires tickets and uploads, empties the trash after its retention
+  period, delivers the outbox and runs plugin sweeps. Each framework page shows the usual place to put it.
+- **Behind a proxy you control**, set `trustProxy: true` on `betterFiles()`. Rate limits, IP rules and the activity log
+  then use the client address from `X-Forwarded-For`. A framework's own proxy setting does not change what Better
+  Files sees.
+- **A browser app on another origin** must be listed in `trustedOrigins`. Requests that carry cookies must come from
+  the page's own origin or a trusted one, and every protocol call must carry the `X-Better-Files: 1` header the
+  client sends. Together these stop cross-site request forgery. Bearer-token requests are not affected.
+- **Mount elsewhere** by setting `basePath` on both `betterFiles()` and the client
+  (`createBetterFilesClient({ basePath })`), and moving the route folder to match.
+
+<Callout type="info" title="Types flow from the instance">
+  `typeof dr` carries every plugin's endpoints and your own schema fields. The client and the UI bindings take it as a
+  type parameter, so they are typed end to end. Import it with `import type` so no server code reaches the browser
+  bundle.
+</Callout>
+
+## Without an integration
+
+Every integration is a thin layer over three functions from `better-files/middleware`. You can use them directly on
+any framework:
+
+```ts
+import { bindApi, errorResponse, requireCapabilities, toHeaders } from 'better-files/middleware';
+
+const credential = { headers: toHeaders(req.headers) }; // Node headers or fetch Headers
+const api = bindApi(dr, credential); // api.rooms.list({ tenantId })
+const held = await requireCapabilities(dr, credential, {
+  tenantId,
+  roomId,
+  nodeId,
+  capabilities: ['VIEW'],
+}); // throws NOT_FOUND or FORBIDDEN
+const { status, body } = errorResponse(error); // the protocol's error envelope
+```
+
+- `dr.handler(request, { ip })` answers the protocol for a fetch `Request`.
+- `dr.nodeHandler(req, res)` does the same on Node's `IncomingMessage` and `ServerResponse`, streaming both ways.
+- `dr.capabilitiesFor(credential, { tenantId, roomId, nodeIds })` returns the capability names for many nodes in one
+  call.

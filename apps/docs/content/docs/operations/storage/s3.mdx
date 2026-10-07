@@ -1,0 +1,247 @@
+---
+title: S3 and compatible
+description: Store files in AWS S3, Cloudflare R2, MinIO, Backblaze B2 or Wasabi with s3Storage, which signs requests itself and needs no AWS SDK.
+metaTitle: S3, R2 and MinIO storage
+icon: Database
+packages: ['@better-files/storage-s3']
+sources:
+  - packages/storage-s3/src/index.ts
+  - packages/storage-s3/src/credentials.ts
+  - packages/storage-s3/src/sigv4.ts
+  - packages/storage-s3/README.md
+  - packages/server/src/files.ts
+  - packages/server/src/endpoints/nodes.ts
+  - packages/server/src/engine.ts
+  - packages/client/src/index.ts
+  - README.md
+---
+
+Most deployments keep files in an S3 bucket or a service that speaks the same API. The AWS SDK is large and does not
+run everywhere, so `s3Storage` implements the few calls Better Files needs on `fetch`, signing each request with AWS
+Signature Version 4 (SigV4). It works on Node.js and on edge runtimes, against AWS S3, Cloudflare R2, MinIO,
+Backblaze B2 and Wasabi.
+
+```ts
+import { betterFiles } from 'better-files';
+import { s3Storage } from 'better-files/storage-s3';
+
+export const dr = betterFiles({
+  // iam, database, secret, plugins …
+  storage: s3Storage({ bucket: 'acme-rooms', region: 'eu-west-1' }),
+});
+```
+
+Without `credentials`, the adapter finds them like the AWS SDK does: environment variables, a web identity, a
+container role, or the EC2 instance role.
+
+## Options
+
+<TypeTable
+  type={{
+    bucket: { type: 'string', description: 'The bucket name.', required: true },
+    region: {
+      type: 'string',
+      description: 'The signing region, such as eu-west-1. Also picks the AWS endpoint https://s3.{region}.amazonaws.com when endpoint is not set.',
+      required: true,
+    },
+    endpoint: {
+      type: 'string',
+      description: 'A custom endpoint for R2, MinIO, B2 or Wasabi, such as https://{account}.r2.cloudflarestorage.com.',
+    },
+    forcePathStyle: {
+      type: 'boolean',
+      description: 'Address objects as {endpoint}/{bucket}/{key} instead of {bucket}.{host}/{key}.',
+      default: 'true when endpoint is set, else false',
+    },
+    credentials: {
+      type: 'AwsCredentials | (() => Promise of AwsCredentials)',
+      description: 'Static keys, or a function called before each request that returns fresh ones.',
+      default: 'awsCredentials()',
+    },
+    prefix: {
+      type: 'string',
+      description: 'Prepended to every key (a trailing slash is added), so several apps can share a bucket.',
+    },
+    serverSideEncryption: {
+      type: "'AES256' | 'aws:kms'",
+      description: 'Asks S3 to encrypt at rest as well, on top of Better Files encryption. Sent on put, copy and multipart create.',
+    },
+    fetch: { type: 'typeof fetch', description: 'The fetch implementation.', default: 'globalThis.fetch' },
+  }}
+/>
+
+`AwsCredentials` is `{ accessKeyId, secretAccessKey, sessionToken? }`. Keys longer than 1,024 characters are refused
+with `INVALID_INPUT`.
+
+## Credentials
+
+`awsCredentials(options?)` returns a function that resolves credentials in the same order as the AWS SDK's default
+chain:
+
+1. `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` (with `AWS_SESSION_TOKEN` when set);
+2. a web identity, as on EKS with IAM roles for service accounts: `AWS_WEB_IDENTITY_TOKEN_FILE` and `AWS_ROLE_ARN`,
+   exchanged with STS `AssumeRoleWithWebIdentity` (`AWS_ROLE_SESSION_NAME` is optional);
+3. container credentials, as on ECS task roles and EKS Pod Identity: `AWS_CONTAINER_CREDENTIALS_RELATIVE_URI` or
+   `AWS_CONTAINER_CREDENTIALS_FULL_URI`, with `AWS_CONTAINER_AUTHORIZATION_TOKEN` or
+   `AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE`. A full URI must use HTTPS unless it points at a link-local container
+   host or localhost;
+4. the EC2 instance role through IMDSv2, unless `AWS_EC2_METADATA_DISABLED=true`.
+
+Temporary credentials are cached until five minutes before they expire, and concurrent callers share one refresh.
+When nothing is found, the first request fails with `INVALID_CONFIG`.
+
+```ts
+import { awsCredentials, s3Storage } from 'better-files/storage-s3';
+
+const credentials = awsCredentials({ refreshBeforeMs: 10 * 60_000 });
+const storage = s3Storage({ bucket: 'acme-rooms', region: 'eu-west-1', credentials });
+```
+
+<TypeTable
+  type={{
+    env: { type: 'Record of string', description: 'Environment variables to read.', default: 'process.env' },
+    refreshBeforeMs: {
+      type: 'number',
+      description: 'Refresh temporary credentials this long before they expire.',
+      default: '300000 (5 minutes)',
+    },
+    fetch: { type: 'typeof fetch', description: 'Used for STS, the container endpoint and IMDS.' },
+    now: { type: '() => number', description: 'The clock, for tests.' },
+    readFile: {
+      type: '(path: string) => Promise of string',
+      description: 'Reads token files (web identity, Pod Identity).',
+      default: 'fs.readFile',
+    },
+  }}
+/>
+
+The same function feeds [`awsKms`](/docs/operations/encryption), which is why `better-files/kms` re-exports it.
+
+The identity needs `s3:PutObject`, `s3:GetObject`, `s3:DeleteObject` and `s3:AbortMultipartUpload` on the bucket's
+objects. With `serverSideEncryption: 'aws:kms'`, it also needs permission to use the bucket's KMS key.
+
+## Endpoints and addressing
+
+Without `endpoint`, requests go to `https://s3.{region}.amazonaws.com` with virtual-hosted addressing
+(`https://{bucket}.s3.{region}.amazonaws.com/{key}`). Setting `endpoint` switches to path-style addressing
+(`{endpoint}/{bucket}/{key}`) unless you pass `forcePathStyle: false`.
+
+<Tabs items={['Cloudflare R2', 'MinIO', 'Backblaze B2', 'Wasabi']}>
+  <Tab value="Cloudflare R2">
+    ```ts
+    s3Storage({
+      bucket: 'acme-rooms',
+      region: 'auto',
+      endpoint: `https://${process.env.R2_ACCOUNT_ID}.r2.cloudflarestorage.com`,
+      credentials: {
+        accessKeyId: process.env.R2_ACCESS_KEY_ID!,
+        secretAccessKey: process.env.R2_SECRET_ACCESS_KEY!,
+      },
+    });
+    ```
+  </Tab>
+  <Tab value="MinIO">
+    ```ts
+    s3Storage({
+      bucket: 'acme-rooms',
+      region: 'us-east-1',
+      endpoint: 'http://localhost:9000',
+      credentials: { accessKeyId: 'minioadmin', secretAccessKey: 'minioadmin' },
+    });
+    ```
+  </Tab>
+  <Tab value="Backblaze B2">
+    ```ts
+    s3Storage({
+      bucket: 'acme-rooms',
+      region: 'us-west-004',
+      endpoint: 'https://s3.us-west-004.backblazeb2.com',
+      credentials: { accessKeyId: process.env.B2_KEY_ID!, secretAccessKey: process.env.B2_APP_KEY! },
+    });
+    ```
+  </Tab>
+  <Tab value="Wasabi">
+    ```ts
+    s3Storage({
+      bucket: 'acme-rooms',
+      region: 'eu-central-1',
+      endpoint: 'https://s3.eu-central-1.wasabisys.com',
+      credentials: { accessKeyId: process.env.WASABI_KEY!, secretAccessKey: process.env.WASABI_SECRET! },
+    });
+    ```
+  </Tab>
+</Tabs>
+
+`region` is always the value the service expects in the signature; for R2 that is `auto`.
+
+## How requests are made
+
+- **Uploads stream.** When Better Files passes a stream with its length (it always does), the body is sent as it
+  arrives, with an unsigned payload hash. A body of unknown length is read into memory first so it can be hashed.
+- **Range reads** send an HTTP `Range` header, so a viewer page fetches only the encrypted segments it needs.
+- **Copies** are server-side (`x-amz-copy-source`).
+- **Errors.** A 404 becomes `NOT_FOUND`. Other failures become `INTERNAL_ERROR` with the status and the S3 error
+  code. A multipart completion that answers 200 with an error document is treated as a failure.
+
+## Multipart uploads
+
+Files above `limits.partSize` (8 MiB by default) use S3 multipart uploads: `CreateMultipartUpload`, one `UploadPart`
+per part, then `CompleteMultipartUpload` with the parts sorted by number. S3 requires every part but the last to be
+at least 5 MiB, so keep `limits.partSize` at 5 MiB or more (it must also be a multiple of 64 KiB).
+
+Each part is buffered in memory before it is sent, so one upload holds at most one part per concurrent request.
+
+Uploads that are never completed leave parts in the bucket that S3 bills for. Add a lifecycle rule that aborts
+incomplete multipart uploads after a few days.
+
+## Direct uploads
+
+`multipart.presignPart` returns a presigned `PUT` URL for one part, so the browser can encrypt the file and send the
+parts straight to the bucket:
+
+```ts
+const client = createBetterFilesClient<typeof dr>({ tenantId });
+await client.upload({ parentId: folderId, file, direct: true });
+```
+
+The server signs one URL per part, valid until the upload expires (`limits.uploadTtlMs`, 24 hours by default). When
+the client completes, the server reads the object back and accepts it only if every segment decrypts. See
+[Uploads and downloads](/docs/guides/concepts/uploads-and-downloads).
+
+The browser sends the parts cross-origin and needs the `ETag` of each one, so the bucket's CORS rules must allow `PUT`
+from your app's origin and expose `ETag`. On AWS S3:
+
+```sh
+aws s3api put-bucket-cors --bucket acme-rooms --cors-configuration '{
+  "CORSRules": [
+    {
+      "AllowedOrigins": ["https://app.example.com"],
+      "AllowedMethods": ["PUT"],
+      "AllowedHeaders": ["*"],
+      "ExposeHeaders": ["ETag"],
+      "MaxAgeSeconds": 3000
+    }
+  ]
+}'
+```
+
+R2, MinIO, B2 and Wasabi accept the same rule shape through their own consoles or S3 API. Without `ExposeHeaders`,
+the browser cannot read the ETag and the client stops with "Storage returned no ETag".
+
+`presign(key, { method, expiresInSeconds })` signs a single `GET` or `PUT` URL for one object; the core endpoints do
+not call it.
+
+## Signing helpers
+
+The package exports its SigV4 functions for code that calls other S3-compatible endpoints:
+
+- `signHeaders(input)` returns the `Authorization` header for a request;
+- `presignUrl(input)` returns a query-signed URL;
+- `encodeRfc3986(value)` encodes a value as SigV4 requires.
+
+## Related
+
+- [Storage overview](/docs/operations/storage)
+- [Encryption](/docs/operations/encryption): `awsKms` keeps data keys in AWS KMS.
+- [Data residency](/docs/operations/storage/regional): one bucket per region.
+- [Deployment](/docs/operations/deployment)

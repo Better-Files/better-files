@@ -1,0 +1,520 @@
+---
+title: Installation
+description: Set up Better Files for production with Better IAM, a database adapter, a storage adapter, encryption and a framework adapter.
+icon: Package
+packages: ['better-files', 'better-iam']
+sources:
+  - README.md
+  - examples/README.md
+  - examples/express-better-iam/better-files.ts
+  - examples/express-better-iam/better-files.config.ts
+  - examples/express-better-iam/server.ts
+  - examples/storage-cluster/better-files.ts
+  - packages/better-files/package.json
+  - packages/server/src/options.ts
+  - packages/server/src/index.ts
+  - packages/server/src/engine.ts
+  - packages/server/src/jobs.ts
+  - packages/crypto/src/index.ts
+  - packages/iam/src/index.ts
+  - packages/cli/src/cli.ts
+  - packages/core/src/schema.ts
+  - packages/adapter-postgres/src/index.ts
+  - packages/adapter-sqlite/src/index.ts
+  - packages/adapter-libsql/src/index.ts
+  - packages/adapter-pglite/src/index.ts
+  - packages/adapter-prisma/src/index.ts
+  - packages/adapter-drizzle/src/index.ts
+  - packages/storage-s3/src/index.ts
+  - packages/storage-fs/src/index.ts
+  - packages/storage-gcs/src/index.ts
+  - packages/storage-azure/src/index.ts
+  - packages/storage-regional/src/index.ts
+  - packages/storage-cluster/src/index.ts
+---
+
+A production instance needs four things besides your code: Better IAM for identity, a database for the Better Files
+tables, storage for the encrypted files, and a secret. This page walks through each choice, then shows how to create
+the tables, schedule maintenance and mount the protocol. If you have not tried Better Files yet, start with the
+[quickstart](/docs/guides/quickstart), which needs none of them.
+
+```ts title="lib/better-files.ts"
+import { betterIam } from 'better-iam';
+import { betterFiles } from 'better-files';
+import {
+  betterFilesIamPlugin,
+  betterFilesResolver,
+  betterIamIntegration,
+} from 'better-files/iam';
+import { postgresAdapter } from 'better-files/adapter-postgres';
+import { s3Storage } from 'better-files/storage-s3';
+
+const plugins = [] as const;
+const iamPlugin = betterFilesIamPlugin({ plugins });
+
+export const iam = betterIam({
+  database: iamDatabase,
+  secret: process.env.BETTER_IAM_SECRET!,
+  baseURL: 'https://app.example.com',
+  plugins: [iamPlugin],
+  resolveResource: betterFilesResolver(() => dr),
+});
+
+export const dr = betterFiles({
+  iam: betterIamIntegration(iam, {
+    iamPlugin,
+    systemCredential: (tenantId) => serviceKeys.get(tenantId),
+  }),
+  database: postgresAdapter({ connectionString: process.env.DATABASE_URL! }),
+  storage: s3Storage({ bucket: 'rooms', region: 'eu-west-1' }),
+  secret: process.env.BETTER_FILES_SECRET!,
+  plugins,
+});
+```
+
+## Install
+
+```npm
+npm install better-files better-iam
+```
+
+- **Node.js 22.12 or newer.** Better Files is ESM-only: set `"type": "module"` in your `package.json`.
+- **Better IAM 0.2.x.** `better-iam` is an optional peer dependency of `better-files` (`>=0.2.0 <0.3.0`). Some
+  features depend on the release; see [release compatibility](/docs/guides/better-iam/compatibility).
+- **Native builds.** With pnpm 10 or later, allow Better IAM's password hashing to build: run
+  `pnpm approve-builds`, or add `allowBuilds: { argon2: true }` to `pnpm-workspace.yaml`. The SQLite adapter uses the
+  native `better-sqlite3` driver, so allow it too if you use SQLite.
+
+The `better-files` package exposes every part as a subpath, such as `better-files/iam`,
+`better-files/adapter-postgres` and `better-files/plugin-nda`. Each part is also published on its own as
+`@better-files/<name>`. See [packages](/docs/reference/packages).
+
+## Connect Better IAM
+
+`betterIamIntegration(iam, options)` from `better-files/iam` connects the instance to Better IAM: authentication,
+policy decisions, the directory (rooms, room roles, groups, invitations), encryption keys and the audit chain.
+`betterFilesIamPlugin()` registers the Better Files actions and resource types on Better IAM, and
+`betterFilesResolver()` lets Better IAM policies see folder and document attributes.
+
+`systemCredential` returns the credential Better Files uses for identity-system writes and KMS calls: typically a
+per-tenant service account whose role grants the actions in `systemPolicy(iam)`. Without it, Better IAM's KMS is not
+used for files, so you need `encryption: { keys }` of your own.
+
+The full setup, including the service account and how outsiders are invited, is in
+[Better IAM integration](/docs/guides/better-iam).
+
+## Choose a database
+
+The database adapter holds the Better Files tables. They are named with the prefix `better_files_` (change it with
+`schema.tablePrefix`), so they can live in your app's database next to your own tables and Better IAM's.
+
+<Tabs items={['PostgreSQL', 'SQLite', 'libSQL', 'PGlite', 'Prisma', 'Drizzle']} groupId="database">
+<Tab value="PostgreSQL">
+
+```ts
+import { postgresAdapter } from 'better-files/adapter-postgres';
+
+// A connection string, or your app's existing pg Pool to share connections.
+const database = postgresAdapter({ connectionString: process.env.DATABASE_URL! });
+const shared = postgresAdapter({ pool });
+```
+
+Options: `connectionString` or `pool` (one is required), `poolSize` (default 10, for a new pool), and `partitions`
+for range-partitioned tables such as `{ activity: { interval: 'month' } }`.
+
+</Tab>
+<Tab value="SQLite">
+
+```ts
+import { sqliteAdapter } from 'better-files/adapter-sqlite';
+
+const database = sqliteAdapter({ filename: 'better-files.db' });
+```
+
+Options: `filename` (a path, or `:memory:`), `busyTimeoutMs` (default 5000) and `journalMode` (default `wal` for
+files). Uses the native `better-sqlite3` driver.
+
+</Tab>
+<Tab value="libSQL">
+
+```ts
+import { libsqlAdapter } from 'better-files/adapter-libsql';
+
+const database = libsqlAdapter({
+  url: 'libsql://your-db.turso.io',
+  authToken: process.env.TURSO_AUTH_TOKEN,
+});
+```
+
+Options: `url` (`file:local.db`, `libsql://…` for Turso, or `http://…` for sqld) with `authToken`, or an existing
+`client`.
+
+</Tab>
+<Tab value="PGlite">
+
+```ts
+import { pgliteAdapter } from 'better-files/adapter-pglite';
+
+const database = pgliteAdapter({ dataDir: './pgdata' });
+```
+
+Embedded PostgreSQL. Options: an existing `client`, or `dataDir` for a new instance (in memory when omitted), and
+`partitions` as in `postgresAdapter`. Install `@electric-sql/pglite` yourself.
+
+</Tab>
+<Tab value="Prisma">
+
+```ts
+import { prismaAdapter } from 'better-files/adapter-prisma';
+
+const database = prismaAdapter({ client: prisma, provider: 'postgresql' });
+```
+
+Uses your `PrismaClient` and its connection pool. Options: `client`, `provider` (`'postgresql'` or `'sqlite'`) and
+`transaction` limits. Generate the models with `better-files generate --format prisma` and add them to
+`schema.prisma`, so `prisma migrate` creates and keeps the tables.
+
+</Tab>
+<Tab value="Drizzle">
+
+```ts
+import { drizzleAdapter } from 'better-files/adapter-drizzle';
+
+const database = drizzleAdapter(db);
+```
+
+Takes your drizzle database and uses its client (node-postgres pool, postgres.js, PGlite, better-sqlite3 or libSQL).
+Generate the tables with `better-files generate --format drizzle` and export them from your schema so drizzle-kit
+keeps them.
+
+</Tab>
+</Tabs>
+
+See [databases](/docs/operations/databases) for each adapter in detail.
+
+## Choose storage
+
+The storage adapter holds file contents. Better Files encrypts them before they reach it.
+
+<Tabs items={['S3', 'File system', 'GCS', 'Azure', 'Regional', 'Cluster']} groupId="storage">
+<Tab value="S3">
+
+```ts
+import { s3Storage } from 'better-files/storage-s3';
+
+const storage = s3Storage({ bucket: 'rooms', region: 'eu-west-1' });
+```
+
+S3 and S3-compatible services (R2, MinIO, B2, Wasabi) over `fetch`, without the AWS SDK. Options: `bucket`,
+`region`, `endpoint` for other services, `forcePathStyle`, `credentials` (default: environment, web identity,
+container or instance role), `prefix` and `serverSideEncryption`.
+
+</Tab>
+<Tab value="File system">
+
+```ts
+import { fileStorage } from 'better-files/storage-fs';
+
+const storage = fileStorage({ root: './files' });
+```
+
+Files on local disk, for development, single servers and on-premises installs. `root` is created when missing.
+
+</Tab>
+<Tab value="GCS">
+
+```ts
+import { gcsStorage } from 'better-files/storage-gcs';
+
+const storage = gcsStorage({ bucket: 'rooms', credentials: { serviceAccount: serviceAccountKey } });
+```
+
+Options: `bucket`, `credentials` (a parsed service-account key, which also enables signed URLs, or
+`{ accessToken }`), `prefix`, `endpoint` and `retries`.
+
+</Tab>
+<Tab value="Azure">
+
+```ts
+import { azureBlobStorage } from 'better-files/storage-azure';
+
+const storage = azureBlobStorage({
+  account: 'myaccount',
+  container: 'rooms',
+  credentials: { accountKey: process.env.AZURE_STORAGE_KEY! },
+});
+```
+
+Options: `account`, `container`, `credentials` (`{ accountKey }`, `{ sasToken }` or `{ accessToken }`), `endpoint`,
+`prefix`, `retries` and `copyTimeoutMs`.
+
+</Tab>
+<Tab value="Regional">
+
+```ts
+import { regionalStorage } from 'better-files/storage-regional';
+
+const storage = regionalStorage({
+  regions: {
+    eu: s3Storage({ bucket: 'rooms-eu', region: 'eu-central-1' }),
+    us: s3Storage({ bucket: 'rooms-us', region: 'us-east-1' }),
+  },
+  defaultRegion: 'eu',
+});
+```
+
+Data residency: each room gets a region, and its files go to that region's adapter.
+
+</Tab>
+<Tab value="Cluster">
+
+```ts
+import { storageCluster } from 'better-files/storage-cluster';
+
+const cluster = storageCluster({
+  database: postgresAdapter({ connectionString: process.env.DATABASE_URL!, poolSize: 5 }),
+  secret: process.env.STORAGE_CLUSTER_SECRET!,
+  operatorTenant: 'ops',
+});
+// betterFiles({ storage: cluster.storage, plugins: [...plugins, cluster.plugin], ... })
+```
+
+Your own servers' disks, with replication across zones. Each server runs the `better-files-node` agent.
+
+</Tab>
+</Tabs>
+
+See [storage](/docs/operations/storage) for each adapter in detail.
+
+## The secret
+
+`secret` is required and must be at least 32 characters; `betterFiles()` refuses to start otherwise. It signs the
+download and viewer tickets. Keep it secret, and keep it the same across restarts and processes: a ticket signed by
+one process must verify on another.
+
+```sh
+node -e "console.log(require('node:crypto').randomBytes(32).toString('base64url'))"
+```
+
+## Encryption
+
+Files are encrypted at rest with AES-256-GCM, in 64 KiB segments, under a data key that a **key provider** wraps.
+`betterFiles()` refuses to start without a key provider unless you turn encryption off.
+
+- **Better IAM's KMS (the default).** With `systemCredential` set, `betterIamIntegration` provides the keys: one KMS
+  key per room by default. Deleting a room schedules its key for deletion (after 7 days), which leaves the room's
+  files unreadable. Set
+  `keys: { perRoom: false }` on the
+  integration for one key per tenant. See [keys and audit](/docs/guides/better-iam/keys-and-audit).
+- **Your own key provider.** `encryption: { keys }` takes any key provider and wins over the integration's.
+  `localKeyProvider({ secret })` derives a key per tenant from a secret of at least 32 characters, for development,
+  tests and single-server installs. `better-files/kms` has providers for cloud key services.
+- **No encryption.** `encryption: false` stores files unencrypted. Use it for development only.
+
+```ts
+import { localKeyProvider } from 'better-files';
+
+const dr = betterFiles({
+  // ...
+  encryption: { keys: localKeyProvider({ secret: process.env.BETTER_FILES_KEY_SECRET! }) },
+});
+```
+
+See [encryption](/docs/operations/encryption).
+
+## Create the tables
+
+`dr.initialize()` creates or upgrades the Better Files tables, including those of your plugins. Run it at deploy time,
+like `iam.initialize()`. The CLI does the same:
+
+```sh
+npx better-files migrate
+```
+
+The CLI loads your instance from `better-files.config.ts` (or `.mts`, `.js`, `.mjs`) in the current folder, whose
+default export (or `dr` export) is the instance; `--config <file>` points elsewhere. A TypeScript config needs Node.js
+22.18 or newer, or a loader such as `tsx`.
+
+```ts title="better-files.config.ts"
+export { dr as default } from './lib/better-files.js';
+```
+
+With Prisma or Drizzle, your migration tool owns the tables: generate them with `better-files generate`. See
+[CLI](/docs/operations/cli).
+
+## Schedule maintenance
+
+`dr.maintain()` does the periodic work: it removes expired tickets and upload sessions, purges trash past
+retention, closes rooms whose closing time passed, ends members' access windows, runs background jobs a runner
+missed, and runs plugin sweeps. Call it every few minutes from a timer, a cron route or a scheduler:
+
+```ts
+setInterval(() => void dr.maintain().catch(console.error), 5 * 60_000);
+```
+
+Or run it from the CLI: `npx better-files maintain --every 300`. See
+[maintenance and jobs](/docs/operations/maintenance-and-jobs).
+
+## Mount the protocol
+
+The browser client and hooks talk to the protocol, which a framework adapter mounts under `/api/better-files`:
+
+<Tabs items={['Next.js', 'Express']}>
+<Tab value="Next.js">
+
+```ts title="app/api/better-files/[...path]/route.ts"
+import { createBetterFilesNext } from 'better-files/next';
+import { dr } from '@/lib/better-files';
+
+export const runtime = 'nodejs';
+export const { GET, HEAD, POST, PUT, OPTIONS } = createBetterFilesNext(dr).handlers();
+```
+
+</Tab>
+<Tab value="Express">
+
+```ts title="server.ts"
+import { createBetterFilesExpress } from 'better-files/middleware/express';
+
+const rooms = createBetterFilesExpress(dr);
+app.use(rooms.middleware);
+app.use(rooms.errorHandler);
+```
+
+</Tab>
+</Tabs>
+
+The protocol refuses calls without the header `x-better-files: 1` (the client sends it), and calls carrying cookies
+must come from the page's own origin or one listed in `trustedOrigins`. See [frameworks](/docs/frameworks) for
+NestJS, Nuxt, SvelteKit, React Router, Hono, Fastify, Koa and plain fetch handlers.
+
+## Environment variables
+
+`betterFiles()` takes every value as an option, so the variable names are yours to choose. The Better IAM examples
+in `examples/` use these:
+
+| Variable | Used for |
+| --- | --- |
+| `IAM_SECRET` | Better IAM's `secret` (32 characters or more) |
+| `BETTER_FILES_SECRET` | Better Files' `secret` (32 characters or more) |
+| `BETTER_FILES_SERVICE_TOKEN` | The service account behind `systemCredential`, allowed the actions in `systemPolicy(iam)` |
+| `ANTHROPIC_API_KEY` | Optional, for the [AI plugin](/docs/plugins/ai) |
+
+The `better-files sync` commands read `BETTER_FILES_URL`, `BETTER_FILES_TOKEN` and `BETTER_FILES_TENANT` when the
+matching flags are not given.
+
+## Options
+
+`betterFiles(options)` takes:
+
+<TypeTable
+  type={{
+    iam: {
+      type: 'IamIntegration',
+      description: 'Identity and authorization: betterIamIntegration(iam) from better-files/iam.',
+      required: true,
+    },
+    database: {
+      type: 'DatabaseAdapter',
+      description: 'Where the Better Files tables live.',
+      required: true,
+    },
+    storage: {
+      type: 'StorageAdapter',
+      description: 'Where the encrypted file contents live.',
+      required: true,
+    },
+    secret: {
+      type: 'string',
+      description: 'At least 32 characters. Signs download and viewer tickets. Keep it stable across restarts.',
+      required: true,
+    },
+    encryption: {
+      type: '{ keys: KeyProvider } | false',
+      description: 'The key provider for stored files, or false to store them unencrypted (development only).',
+      default: "the identity integration's key provider",
+    },
+    basePath: {
+      type: 'string',
+      description: 'Where the HTTP protocol is mounted.',
+      default: "'/api/better-files'",
+    },
+    schema: {
+      type: 'SchemaOptions',
+      description: 'tablePrefix, table renames and typed additional fields on core tables.',
+      default: "tablePrefix 'better_files_'",
+    },
+    capabilities: {
+      type: '{ extensions?, presets? }',
+      description: 'Extra capabilities (from bit 16 upward), and named masks shown in permission UIs in addition to the built-in presets.',
+    },
+    plugins: {
+      type: 'BetterFilesPlugin[]',
+      description: 'The plugins to load.',
+    },
+    hooks: {
+      type: 'BetterFilesHooks',
+      description: "Application hooks with the same shape as plugin hooks, run after every plugin's.",
+    },
+    trustedOrigins: {
+      type: 'string[]',
+      description: "Origins allowed to send cookie-bearing requests. The request's own origin is always allowed.",
+    },
+    trustProxy: {
+      type: 'boolean',
+      description: 'Use X-Forwarded-For as the client address. Only behind a proxy you control.',
+    },
+    maxJsonBodyBytes: {
+      type: 'number',
+      description: 'Largest JSON body the protocol accepts.',
+      default: '65536 (64 KiB)',
+    },
+    limits: {
+      type: 'Partial of EngineLimits',
+      description: 'File size, folder download, upload part and ticket limits (below).',
+    },
+    jobs: {
+      type: 'JobsOptions',
+      description: "Where durable background jobs run: runner 'inline' (in this process), 'deferred' (when you call dr.jobs.work() or dr.maintain()), or a JobRunner for your queue; plus handlers and concurrency (default 4).",
+      default: "{ runner: 'inline' }",
+    },
+    clock: {
+      type: 'Clock',
+      description: 'An object with now(), for tests.',
+      default: 'Date.now()',
+    },
+    logger: {
+      type: 'Logger',
+      description: 'warn and error (debug and info optional).',
+      default: 'console',
+    },
+  }}
+/>
+
+`limits` takes:
+
+<TypeTable
+  type={{
+    maxFileSize: { type: 'number', description: 'Largest file accepted, in bytes.', default: '5 GiB' },
+    maxBundleFiles: { type: 'number', description: 'Most files in one folder download.', default: '5000' },
+    partSize: {
+      type: 'number',
+      description: 'Plaintext bytes per upload part; a positive multiple of 64 KiB.',
+      default: '8 MiB',
+    },
+    uploadTtlMs: { type: 'number', description: 'How long an upload session stays open.', default: '24 hours' },
+    ticketTtlMs: { type: 'number', description: 'How long a download or viewer ticket is valid.', default: '60 seconds' },
+    ticketUses: {
+      type: 'number',
+      description: 'How many requests one ticket may serve (range requests, resumed downloads).',
+      default: '5',
+    },
+  }}
+/>
+
+## Related
+
+- [Quickstart](/docs/guides/quickstart)
+- [Better IAM integration](/docs/guides/better-iam)
+- [Deployment](/docs/operations/deployment)
+- [Security](/docs/operations/security)

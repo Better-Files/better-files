@@ -1,0 +1,92 @@
+---
+title: Vue
+metaTitle: Better Files for Vue
+description: Typed composables that follow refs and route params, a capability-aware Can component, uploads with progress, and live rooms.
+icon: Vue
+packages:
+  - '@better-files/vue'
+  - '@better-files/client'
+sources:
+  - packages/vue/src/index.ts
+  - packages/client/src/cache.ts
+---
+
+`better-files/vue` offers the same reads, uploads, actions and live rooms as the
+[React bindings](/docs/frameworks/react), as Vue composables. Arguments accept plain values, refs and getters, so a
+query follows a route param on its own.
+
+## Set up
+
+```ts title="src/files.ts"
+import { createBetterFilesClient } from 'better-files/client';
+import { createBetterFilesVue } from 'better-files/vue';
+import type { dr } from '../server/better-files';
+
+export const files = createBetterFilesVue<typeof dr>();
+export const client = createBetterFilesClient<typeof dr>({ tenantId: () => getTenantId() });
+```
+
+```ts title="src/main.ts"
+import { createApp } from 'vue';
+import App from './App.vue';
+import { client, files } from './files';
+
+createApp(App).use(files.plugin, { client }).mount('#app');
+```
+
+To give one subtree its own client, call `files.provideBetterFiles(client)` in a component's `setup` instead.
+
+## Reading
+
+```vue title="src/pages/RoomPage.vue"
+<script setup lang="ts">
+import { useRoute } from 'vue-router';
+import { files } from '../files';
+
+const route = useRoute();
+const index = files.useRoomIndex(() => route.params.roomId as string);
+</script>
+
+<template>
+  <p v-if="index.loading.value">Loading…</p>
+  <ul v-else>
+    <li v-for="entry in index.data.value ?? []" :key="entry.id">{{ entry.index }} {{ entry.name }}</li>
+  </ul>
+</template>
+```
+
+Each read returns `{ data, error, loading, refresh }`. The first three are computed refs. The composables are
+`useRooms`, `useRoom`, `useRoomIndex`, `useFolder`, `useDocument`, `useMembers`, `useActivity`,
+`useCapabilities(roomId, nodeIds)` and `useQuery(key, fetcher)`, with the same calls and cache keys as the
+[React hooks](/docs/frameworks/react#reading). A `null` id waits instead of fetching.
+
+## Can
+
+```vue
+<files.Can :room-id="roomId" :node-id="doc.id" capability="DOWNLOAD_ORIGINAL">
+  <DownloadOriginalButton />
+  <template #fallback><WatermarkedOnly /></template>
+</files.Can>
+```
+
+Register it globally with `app.component('FilesCan', files.Can)` if you prefer a tag name. Like every client-side
+check, it only decides what to show. The server enforces access.
+
+## Uploads, writes and live rooms
+
+```ts
+const { upload, items, clear } = files.useUpload(); // items is a ref
+const rename = files.useAction(
+  (client, nodeId: string, name: string) => client.documents.rename({ nodeId, name }),
+  ['folder:', 'document:'],
+); // rename.run(...), rename.pending, rename.error
+const latest = files.useLiveRoom(() => route.params.roomId as string); // switches rooms with the route
+```
+
+These behave as their [React counterparts](/docs/frameworks/react#uploads) do. `useLiveRoom` closes its subscription
+when the component's scope is disposed, and when the room id changes it moves to the new room.
+
+## Nuxt
+
+For a Nuxt app, mount the protocol with [the h3 handler](/docs/frameworks/nuxt) and install the plugin from a
+client-side Nuxt plugin (`plugins/files.client.ts`).

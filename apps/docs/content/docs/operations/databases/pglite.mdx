@@ -1,0 +1,99 @@
+---
+title: PGlite
+description: Run the Better Files tables on PGlite, PostgreSQL compiled to WebAssembly, for development, tests, single-process apps and edge runtimes.
+metaTitle: PGlite embedded PostgreSQL adapter
+icon: Database
+packages: ['@better-files/adapter-pglite']
+sources:
+  - packages/adapter-pglite/src/index.ts
+  - packages/adapter-pglite/README.md
+  - packages/adapter-pglite/package.json
+  - packages/adapter-sql/src/index.ts
+  - tests/conformance/sql-databases.test.ts
+  - tests/conformance/postgres-partitions.test.ts
+  - tests/conformance/orm-adapters.test.ts
+---
+
+Developing against SQLite and deploying on PostgreSQL means the SQL you test is not the SQL you ship. Running a
+PostgreSQL server for every developer and every test run is the usual fix, and a chore.
+[PGlite](https://pglite.dev) is PostgreSQL compiled to WebAssembly: a real PostgreSQL that runs inside your Node.js
+process, with no server. `pgliteAdapter` runs the Better Files tables on it, through the same PostgreSQL code path as
+[`postgresAdapter`](/docs/operations/databases/postgres).
+
+```sh
+npm install @electric-sql/pglite
+```
+
+```ts
+import { pgliteAdapter } from 'better-files/adapter-pglite';
+
+betterFiles({ database: pgliteAdapter({ dataDir: './.better-files-db' }), ...options }); // in memory when omitted
+betterFiles({ database: pgliteAdapter({ client: existingPglite }), ...options }); // share an instance
+```
+
+`@electric-sql/pglite` is an optional peer dependency: install it yourself. The adapter imports it only when it first
+needs a new instance.
+
+## Options
+
+<TypeTable
+  type={{
+    client: {
+      type: 'PGlite',
+      description: 'An existing PGlite instance, shared with the rest of the app. dr.close() leaves it open.',
+    },
+    dataDir: {
+      type: 'string',
+      description: "Where a new instance keeps its data, such as './pgdata' or 'idb://better-files'. Ignored when you pass a client.",
+      default: 'in memory',
+    },
+    partitions: {
+      type: 'PartitionOptions',
+      description: 'Range-partitioned tables, exactly as in postgresAdapter.',
+    },
+  }}
+/>
+
+With no options, `pgliteAdapter()` creates an in-memory database, which is gone when the process ends. When the
+adapter creates the instance, `dr.close()` closes it.
+
+## Where it fits
+
+- **Development.** The same SQL, types and casts as production PostgreSQL, from a folder on disk.
+- **Tests.** A fresh in-memory database per test, with nothing to start or clean up. The Better Files test suite runs
+  the database conformance cases and a full engine flow on PGlite, so the PostgreSQL path is exercised on every
+  machine, not only where a PostgreSQL server is available. The partitioning tests also run on it.
+- **Single-process deployments and edge runtimes.** One process owns the database: there is no server for other
+  processes to connect to.
+
+## How it behaves
+
+- PGlite has a single connection. A Better Files transaction holds it; work nested inside the transaction joins it.
+- `int8` results, such as counts, arrive from PGlite as `bigint`; the adapter turns them into numbers.
+- Placeholders carry explicit casts, unique violations (`23505`) are reported as `CONFLICT`, and types are the same
+  as on [PostgreSQL](/docs/operations/databases/postgres#placeholders-with-explicit-casts).
+
+## Partitioned tables
+
+`partitions` and `partitionsPlugin` work as on PostgreSQL:
+
+```ts
+import { partitionsPlugin, pgliteAdapter } from 'better-files/adapter-pglite';
+
+const database = pgliteAdapter({ partitions: { activity: { interval: 'month' } } });
+const dr = betterFiles({ database, plugins: [partitionsPlugin(database), ...plugins], ...options });
+```
+
+See [Partitioned tables](/docs/operations/databases/postgres#partitioned-tables) for the options, `convert` and
+`status`.
+
+## Share an instance with Drizzle
+
+The [Drizzle adapter](/docs/operations/databases/prisma-and-drizzle) recognizes a drizzle database over PGlite and
+runs it through `pgliteAdapter({ client })`, so the behavior is identical.
+
+## Related
+
+- [Databases](/docs/operations/databases)
+- [PostgreSQL](/docs/operations/databases/postgres)
+- [Testing](/docs/operations/testing)

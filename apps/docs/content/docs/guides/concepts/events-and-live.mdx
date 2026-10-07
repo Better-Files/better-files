@@ -1,0 +1,263 @@
+---
+title: Events and live updates
+description: Server-side event subscriptions after each commit, the room activity stream over Server-Sent Events, and live views in React, Vue and Svelte.
+metaTitle: Events and live room updates
+icon: RadioTower
+packages: ['@better-files/server', '@better-files/client', '@better-files/react', '@better-files/vue', '@better-files/svelte']
+sources:
+  - packages/server/src/events.ts
+  - packages/server/src/pipeline.ts
+  - packages/server/src/stream.ts
+  - packages/server/src/http.ts
+  - packages/server/src/index.ts
+  - packages/server/src/endpoints/rooms.ts
+  - packages/server/src/endpoints/nodes.ts
+  - packages/server/src/endpoints/people.ts
+  - packages/server/src/endpoints/permissions.ts
+  - packages/core/src/plugin.ts
+  - packages/client/src/live.ts
+  - packages/client/src/index.ts
+  - packages/react/src/index.tsx
+  - packages/vue/src/index.ts
+  - packages/svelte/src/index.ts
+---
+
+Your app wants to react when something happens in a room: email the deal team when a buyer uploads a document,
+reindex a file for search, or refresh a folder on every screen where it is open. Polling is slow and wasteful, and
+reacting before the database has committed means acting on changes that may still roll back.
+
+Better Files gives you two channels:
+
+- **Server-side events** (`dr.events`): in your process, after the transaction commits, for your own code and
+  plugins.
+- **The live activity stream**: a room's activity log as Server-Sent Events, for browsers, filtered for each
+  viewer and resumable.
+
+```ts
+// Server: run code after every document change commits.
+const unsubscribe = dr.events.subscribe('document.*', async (event) => {
+  if (event.type === 'document.uploaded') await notifyDealTeam(event.roomId, event.data);
+});
+
+// Browser: follow a room live.
+const subscription = client.subscribe(roomId, {
+  onActivity: (activity) => console.log(activity.sequence, activity.action),
+});
+```
+
+## Server-side events
+
+`dr.events.subscribe(patterns, handler)` takes one pattern or a list, and returns a function that unsubscribes.
+In a pattern, `*` matches any run of characters: `'*'` is every event, `'room.*'` every room event, `'*.deleted'`
+both deletions.
+
+Every event has this shape:
+
+<TypeTable
+  type={{
+    id: { type: 'string', description: 'A random UUID for this event.' },
+    type: { type: 'string', description: 'What happened, such as document.uploaded.', required: true },
+    tenantId: { type: 'string', description: 'The tenant.', required: true },
+    roomId: { type: 'string', description: 'The room, for operations on a room or its content.' },
+    actorId: { type: 'string', description: 'Who acted: an identity id, or system for maintenance and scheduled work.', required: true },
+    occurredAt: { type: 'number', description: 'When it was published (epoch milliseconds).', required: true },
+    data: { type: 'Record of string to unknown', description: 'The payload: ids and a few details (see the table below).', required: true },
+  }}
+/>
+
+### When events are delivered
+
+An operation does not publish its events while it runs. It queues them, and they are published once its
+transaction has committed. An operation that fails publishes nothing. Then:
+
+1. Subscribers whose pattern matches run one after another, in the order they subscribed.
+2. Plugin `onEvent` hooks run after them.
+3. A handler that throws is logged and changes nothing: not the operation, not the other handlers.
+
+Delivery is awaited before the operation's call returns, so a slow handler slows the call down. Keep handlers short,
+and hand longer work to a background job.
+
+Events are in-process and not stored. A subscriber only hears events from the process it runs in, and an event is
+lost if the process stops between the commit and the publish. For work that must happen, use a durable job
+(`context.enqueue` in a plugin) or the [webhooks plugin](/docs/plugins/webhooks), whose deliveries are stored and
+retried. For a complete history, read the [activity log](/docs/guides/concepts/activity-log).
+
+### Events emitted by the core
+
+| Event | `data` |
+| --- | --- |
+| `room.created` | `roomId`, `name` (the event itself has no `roomId`: the operation targets the tenant) |
+| `room.updated` | `roomId` |
+| `room.published`, `room.closed`, `room.reopened`, `room.archived` | `roomId`, `from`, `to` |
+| `room.deleted` | `roomId`, `name` |
+| `room.exported` | `roomId`, `files` |
+| `folder.created` | `nodeId`, `parentId`, `name` |
+| `folder.renamed`, `document.renamed` | `nodeId`, `name` |
+| `folder.moved`, `document.moved` | `nodeId`, `parentId` |
+| `folder.deleted`, `document.deleted`, `folder.restored`, `document.restored` | `nodeId`, `items` |
+| `document.uploaded`, `version.created` | `nodeId`, `versionId`, `filename` |
+| `version.restored` | `nodeId`, `versionId` |
+| `document.viewed`, `document.downloaded` | `nodeId`, `variant`, `versionId` |
+| `folder.downloaded` | `nodeId`, `files`, `variant` |
+| `member.invited` | `roomId`, `memberId`, `email`, `guest` |
+| `member.joined` | `memberId`, `email` |
+| `member.removed`, `member.suspended`, `member.resumed` | `roomId`, `memberId` |
+| `member.role-changed` | `roomId`, `memberId`, `relation` |
+| `member.expired` | `roomId`, `memberId`, `identityId` |
+| `group.created` | `roomId`, `groupId`, `name` |
+| `group.deleted` | `roomId`, `groupId` |
+| `group.members-added`, `group.members-removed` | `roomId`, `groupId`, `identityIds` |
+| `permissions.changed` | `nodeId`, `changes` |
+
+`member.joined` is published when someone invited by email first calls Better Files and their invitation is
+claimed. `member.expired` and scheduled `room.closed` come from `dr.maintain()`. Plugins emit their own events
+(`nda.accepted`, and so on); each plugin page lists them.
+
+The events mirror the activity log, with three differences: `member.joined` is an event only, `group.updated` and
+`document.flags-changed` are recorded but not emitted, and `room.deleted` is emitted although the room's log is
+deleted with it.
+
+## The live activity stream
+
+Browsers follow a room over Server-Sent Events (SSE), a long-lived HTTP response that the server writes lines to:
+`GET {basePath}/rooms/{roomId}/events?tenantId={tenantId}`.
+
+Mounting `dr.handler` serves it. On the server, `dr.stream(credential, { tenantId, roomId, after?, pingMs?, signal? })`
+returns the same `Response` for hosts that route it themselves.
+
+The stream is read from the activity log, not from the event bus. Each entry is sent as an `activity` event whose
+SSE id is its `sequence`, so a client that reconnects with the standard `Last-Event-ID` header (or `?after=`)
+continues exactly after the last entry it received. Without one, the stream starts with new activity only. The
+event bus only wakes the stream; entries written by another server instance arrive at the next idle ping, every 15
+seconds by default.
+
+What each person sees:
+
+- **Owners, administrators and auditors** (anyone with `better-files:activity:read`) see every record, with its IP
+  address.
+- **Everyone else** sees changes to folders and documents they hold `LIST` on: created, uploaded, renamed, moved,
+  deleted and restored nodes, and new or restored versions. Their metadata is trimmed to names, versions, sizes and
+  item counts; no people, no addresses.
+
+Hashes and user agents are never sent. Opening the stream needs `better-files:rooms:read` on the room (otherwise
+`NOT_FOUND`), and the server checks it again every minute while the stream is open. When access has gone, it sends a
+`revoked` event and closes.
+
+`EventSource` cannot send headers, so this read-only route does not require the `x-better-files` header. A request
+from another origin is still refused unless that origin is in `trustedOrigins`.
+
+## Follow a room from the client
+
+`client.subscribe(roomId, options)` reads the stream with `fetch`, so bearer tokens work as well as cookies. It
+reconnects with backoff (up to 30 seconds) and resumes after the last entry it delivered.
+
+```ts
+const subscription = client.subscribe(roomId, {
+  onActivity(activity) {
+    // { sequence, action, actorId, nodeId?, metadata?, createdAt, roomId }
+  },
+  onRevoked() {
+    // Access to the room was withdrawn; the subscription has ended.
+  },
+  onError(error) {
+    // A connection failed; the client retries.
+  },
+});
+
+subscription.close();
+```
+
+<TypeTable
+  type={{
+    onActivity: { type: '(activity: RoomActivity) => void', description: 'Called for each entry.', required: true },
+    onRevoked: { type: '() => void', description: 'Called once when the server sends revoked or answers 401, 403 or 404.' },
+    onError: { type: '(error: unknown) => void', description: 'Called when a connection fails, before the retry.' },
+    after: { type: 'number', description: 'Resume after this sequence.' },
+    signal: { type: 'AbortSignal', description: 'Ends the subscription.' },
+    tenantId: { type: 'string', description: 'Overrides the client tenant.' },
+  }}
+/>
+
+### Live views in UI frameworks
+
+The framework bindings follow a room and refresh the cached queries an entry affects: the room index and folders
+on content changes, members and capabilities on people changes, the room on room changes.
+
+<Tabs items={['React', 'Vue', 'Svelte']} groupId="ui">
+<Tab value="React">
+
+```tsx
+const { useLiveRoom, useFolder } = createBetterFilesReact<typeof dr>();
+
+function Folder({ roomId, folderId }: { roomId: string; folderId: string }) {
+  const last = useLiveRoom(roomId, (activity) => console.log(activity.action));
+  const folder = useFolder(folderId); // refreshes when the folder changes
+  return <p>{folder.data?.items.length ?? 0} items, last change: {last?.action ?? 'none'}</p>;
+}
+```
+
+`useLiveRoom(roomId, onActivity?)` returns the latest entry and closes the stream on unmount.
+
+</Tab>
+<Tab value="Vue">
+
+```ts
+const rooms = createBetterFilesVue<typeof dr>();
+
+// in setup()
+const last = rooms.useLiveRoom(() => route.params.roomId as string, (activity) => {
+  console.log(activity.action);
+});
+```
+
+`useLiveRoom` returns a ref with the latest entry, follows a changing room id, and closes when the scope is
+disposed.
+
+</Tab>
+<Tab value="Svelte">
+
+```ts
+// $lib/better-files.ts
+export const rooms = createBetterFilesSvelte<typeof dr>(client);
+
+// in a component: subscribing to the store opens the stream
+const live = rooms.live(roomId, (activity) => console.log(activity.action));
+// $live is the latest entry
+```
+
+`rooms.live(roomId, onActivity?)` is a readable store; the stream stays open while it has subscribers.
+
+</Tab>
+</Tabs>
+
+## Events in plugins
+
+A plugin receives every published event in `onEvent`, after the subscribers, with a maintenance context for
+database access, file reads and jobs:
+
+```ts
+import { definePlugin } from 'better-files';
+
+export const searchSync = definePlugin({
+  id: 'search-sync',
+  async onEvent(event, context) {
+    if (event.type !== 'document.uploaded' && event.type !== 'version.created') return;
+    const content = await context.readVersion(event.tenantId, String(event.data.versionId));
+    await indexDocument(event.tenantId, String(event.data.nodeId), content); // your search index
+  },
+});
+```
+
+`onEvent` runs in the same process, after the commit, and its errors are logged. For work that must survive a
+crash, enqueue a durable job from it with `context.enqueue`.
+
+Inside an endpoint or hook, a plugin emits its own events with `context.emit(type, data)`. They follow the same
+rule: queued until the commit, dropped if the operation fails. `context.emit(type, data, { immediate: true })`
+publishes at once, even when the operation is then refused, for security signals.
+
+## Related
+
+- [Activity log](/docs/guides/concepts/activity-log): the records the live stream is read from.
+- [Webhooks](/docs/plugins/webhooks): stored, signed and retried event deliveries.
+- [Client](/docs/frameworks/client), [React](/docs/frameworks/react), [Vue](/docs/frameworks/vue),
+  [Svelte](/docs/frameworks/svelte)

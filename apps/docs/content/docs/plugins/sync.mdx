@@ -1,0 +1,206 @@
+---
+title: Sync
+description: A snapshot and a permission-aware changes feed for each room, and a CLI that mirrors a room to a local folder.
+metaTitle: Delta sync for data rooms
+icon: RefreshCw
+packages: ['@better-files/plugin-sync', '@better-files/cli']
+sources:
+  - packages/plugin-sync/src/index.ts
+  - packages/plugin-sync/README.md
+  - packages/cli/src/cli.ts
+  - packages/cli/src/mirror.ts
+  - packages/core/src/operations.ts
+  - packages/client/src/index.ts
+  - tests/plugins/sync.test.ts
+---
+
+A desktop app, a backup job or an advisor's laptop wants a copy of a room that stays current without downloading
+everything again. It needs to ask "what changed since last time?", and the answer must follow the person's access:
+when a folder is hidden from them, its files should disappear from their copy too.
+
+The sync plugin adds two read-only endpoints. `sync.snapshot` returns everything the caller can see now, with a
+cursor. `sync.changes` returns what changed since a cursor. The `better-files sync` CLI commands use them to mirror
+a room to a folder.
+
+```ts
+import { betterFiles } from 'better-files';
+import { syncPlugin } from 'better-files/plugin-sync';
+
+export const dr = betterFiles({ /* iam, database, storage, secret */ plugins: [syncPlugin()] });
+
+const { cursor, entries } = await dr.api.sync.snapshot(credential, { tenantId, roomId });
+// later
+const page = await dr.api.sync.changes(credential, { tenantId, roomId, cursor });
+// { reset, cursor, hasMore, changes: [{ type: 'upsert', entry } | { type: 'remove', id }] }
+```
+
+The plugin adds no actions and no tables, so there is nothing to pass to `betterFilesIamPlugin` and nothing to
+migrate. Both endpoints are authorized as `better-files:documents:list` on the room, which every room relation holds,
+and both work on closed rooms.
+
+## Options
+
+<TypeTable
+  type={{
+    pageSize: {
+      type: 'number',
+      description: 'Activity records examined per changes call. A page can return fewer changes than this.',
+      default: '500',
+    },
+  }}
+/>
+
+## Entries
+
+Every folder and document is described by a `SyncEntry`:
+
+<TypeTable
+  type={{
+    id: { type: 'string', description: 'The node id.' },
+    parentId: {
+      type: 'string | null',
+      description: 'The parent folder, or null for items directly under the room root. The root itself is never an entry.',
+    },
+    kind: { type: "'folder' | 'document'", description: 'What the node is.' },
+    name: { type: 'string', description: 'The folder or document name.' },
+    updatedAt: { type: 'number', description: 'When the node last changed, in epoch milliseconds.' },
+    version: {
+      type: '{ id, number, sha256, size, mimeType }',
+      description: 'For documents with content: the current version. Compare sha256 (or id) with your copy to decide whether to download.',
+    },
+  }}
+/>
+
+Snapshots and batches of upserts arrive parents first, then by name, so a client can apply them in order. Entries
+describe the tree only; to fetch a file, call `documents.requestOriginal` or `documents.requestDownload` as usual.
+
+## Follow changes
+
+```ts
+let cursor = (await dr.api.sync.snapshot(credential, { tenantId, roomId })).cursor;
+
+for (let more = true; more; ) {
+  const page = await dr.api.sync.changes(credential, { tenantId, roomId, cursor });
+  if (page.reset) {
+    // Start over: take a new snapshot and replace your copy.
+    break;
+  }
+  for (const change of page.changes) {
+    if (change.type === 'upsert') applyEntry(change.entry);
+    else removeNode(change.id);
+  }
+  cursor = page.cursor; // store it with your copy
+  more = page.hasMore;
+}
+```
+
+The cursor is the room's activity sequence, as a string. The snapshot reads it before it reads the tree, so a change
+recorded while the snapshot is built is replayed by the next `changes` call rather than lost.
+
+`changes` reads up to `pageSize` activity records after the cursor and turns them into changes:
+
+- **Changes to the tree or to content** count: `folder.*` and `document.*` records for created, uploaded, renamed,
+  moved, deleted, restored and flags-changed, every `version.*` record, and `permissions.changed`. Views, downloads,
+  searches, Q&A and other activity do not.
+- **Subtree-wide changes** (`folder.moved`, `folder.deleted`, `folder.restored` and `permissions.changed`) cover
+  every node below the one they name.
+- **Each touched node** is looked up again. If the caller can still see it, it comes back as an `upsert` with its
+  current state; if not (deleted, or no longer visible), as a `remove`.
+
+`hasMore` is true when more records follow; call again with the returned `cursor`.
+
+### When a client must start over
+
+`changes` returns `reset: true`, with no changes and the room's current cursor, when:
+
+- the page contains a `group.*` or `member.*` record, since group and membership changes can change what the caller
+  sees anywhere in the room;
+- the cursor is not a whole number, is negative, or is ahead of the room's activity.
+
+Take a new snapshot after a reset. Anything in your copy that is not in the snapshot should be removed.
+
+## What a caller can see
+
+An entry is included only when the caller has `LIST` on the node and on every folder above it, up to the room root.
+The capability masks are the same ones the room index uses: the permission matrix with room settings, document flags
+and plugins applied. Trashed nodes are never included.
+
+So when a person loses access, the change reaches their copy as removals: hiding a folder from their group records
+`permissions.changed`, and the folder and everything below it come back as `remove`. The owner, who still sees them,
+gets `upsert` for the same records. Someone who is not in the room at all is refused with `FORBIDDEN`.
+
+An entry for a document says nothing about download rights: a person with `LIST` but not `VIEW` or a download
+capability gets the entry, with its version hash, but cannot fetch the file.
+
+## Mirror a room from the command line
+
+`@better-files/cli` uses the sync endpoints to mirror one room into a local folder. It talks to your running app over
+HTTP, so the app must have the sync plugin.
+
+```sh
+export BETTER_FILES_URL=https://app.example.com/api/better-files
+export BETTER_FILES_TOKEN=<an API key or bearer token>
+export BETTER_FILES_TENANT=<tenant id>
+
+better-files sync pull --room <room id> --dir ./falcon
+better-files sync status --room <room id> --dir ./falcon
+better-files sync push --room <room id> --dir ./falcon
+```
+
+| Option | Environment variable | Meaning |
+| --- | --- | --- |
+| `--url` | `BETTER_FILES_URL` | The protocol URL, including the base path. Required |
+| `--token` | `BETTER_FILES_TOKEN` | Sent as `Authorization: Bearer <token>` |
+| `--tenant` | `BETTER_FILES_TENANT` | The tenant. Required |
+| `--room` | none | The room to mirror. Required |
+| `--dir` | none | The local folder; the current folder by default |
+| `--delete` | none | With `push`: also delete remote files and folders removed locally |
+
+The CLI keeps its state in `.better-files/state.json` inside the folder: the room, the server URL, the cursor and,
+for every file, the version and hash it last wrote. A folder mirrors one room on one server; pointing it at another
+fails.
+
+### `sync pull`
+
+Downloads remote changes. The first pull takes a snapshot; later pulls follow `changes`, and a `reset` takes a new
+snapshot.
+
+- Renames and moves become local renames.
+- Files are fetched with `documents.requestOriginal` and, when that is refused, with `documents.requestDownload` (a
+  watermarked copy, if the room watermarks downloads). When both are refused, the file is skipped and listed as view
+  only.
+- A local edit is never overwritten. If a file changed locally and a new version arrives, your copy is renamed, for
+  example to `spa (conflicted copy 2026-10-05 14-30).pdf` (UTC), and the new version is downloaded next to it.
+- When a file is removed or hidden remotely, the local copy is deleted, unless it has local edits; folders are
+  removed only when empty.
+
+The command prints one line per change (`↓` downloaded, `↑` uploaded, `→` moved, `✕` removed, `!` conflict, `·`
+skipped) and a total, or `Up to date`.
+
+### `sync push`
+
+Pulls first, so remote changes land before anything is uploaded over them. Then it creates a remote folder for each
+new local folder, uploads new files, and uploads edited files as new versions. With `--delete`, it deletes remote
+documents and folders whose local copies were deleted; without it, local deletions stay local. Files you could only
+view are never deleted remotely.
+
+### `sync status`
+
+Lists local changes since the last sync (`+` added, `M` modified, `-` deleted) and how many remote changes are
+pending, or `Remote: full resync needed` after a reset. Before the first pull it prints
+`Not synced yet: run better-files sync pull`.
+
+## Limits
+
+- One room per call and per mirrored folder.
+- A client that was away for a long time needs one `changes` call per `pageSize` activity records to catch up.
+- Group or membership changes in the room reset every client, which then downloads the snapshot again (but not the
+  files whose version it already has).
+- `sync status` counts the remote changes of the first page only.
+- The CLI's conflicted copies are ordinary local files: the next `push` uploads them as new documents.
+
+## Related
+
+- [Search](/docs/plugins/search): find files without mirroring the room.
+- [Webhooks](/docs/plugins/webhooks): push notifications of changes to another system.
+- [Better IAM integration](/docs/guides/better-iam)

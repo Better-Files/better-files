@@ -1,0 +1,106 @@
+---
+title: Outsiders
+description: Invite people from outside the organization - bidders, counsel, auditors - as Better IAM guests, or as contained members on releases without guests.
+icon: UserPlus
+packages: ['@better-files/iam']
+sources:
+  - packages/iam/src/index.ts
+  - packages/iam/src/hooks.ts
+  - packages/server/src/endpoints/people.ts
+  - packages/server/src/index.ts
+  - tests/integration/better-iam.test.ts
+---
+
+Most people in a data room do not work for the organization that owns it. A sell-side room is full of bidders,
+their lawyers and their accountants; a board portal has outside directors. They need an account to sign in with, but
+they must not become ordinary members of the organization, with whatever access ordinary members get in the rest
+of your product.
+
+`members.invite` handles both cases. When the email belongs to someone already in the tenant, they are added to the
+room's groups straight away. When it does not, Better Files invites them from outside, into at least one of the room's
+groups:
+
+```ts
+await dr.api.members.invite(credential, {
+  tenantId,
+  roomId,
+  email: 'gina@partner.test',
+  groupIds: [buyerB.id],
+  accessDays: 30,
+  message: 'Welcome to the Project Falcon data room',
+});
+// → { status: 'invited', guest: true, … }
+```
+
+The member stays `invited` until they accept and first call Better Files; then they become `active`. How they are
+invited depends on the Better IAM release.
+
+## Guests
+
+On a Better IAM release with guests (its `main` branch today), outsiders become **Better IAM guests**: sponsored by
+the person who invited them, limited to `accessDays`, and inside the tenant's guest boundary, the ceiling Better IAM
+applies to every guest. This is the default whenever the instance has the guests API.
+
+## Member invitations, on releases without guests
+
+Better IAM 0.2.0, the release on npm, has no guests. Inviting an outsider then reports `UNSUPPORTED` until you choose
+the fallback:
+
+```ts
+betterIamIntegration(iam, { iamPlugin, systemCredential, externalInvites: 'members' });
+```
+
+Outsiders then get a Better IAM **member invitation** into the room's groups. Accepting it makes them regular tenant
+identities, so Better Files contains them in three ways:
+
+- They also join a group named **Better Files outsiders**. Better Files treats everyone in it as a guest: they
+  authenticate with `guest: true`, so NDAs set to apply to outsiders still apply, and audit reports mark them.
+- A member invitation has no access window, so Better Files keeps it: when `accessDays` ends, `dr.maintain()` takes
+  them out of the room's groups and revokes their room role.
+- Removing someone who has not accepted yet withdraws their invitation, so an old email cannot add them later.
+
+`betterFiles()` checks the option at startup: `externalInvites: 'members'` on an instance without member invitations,
+or `'guests'` on one without guests, refuses to start.
+
+### Keep outsiders contained
+
+Being regular members, outsiders get whatever your own roles give every member of the tenant. Check that those give
+nothing by default, and add a deny for the outsiders group to any role that might. `outsiderBoundary()` builds the
+statement; Better Files' Better IAM plugin supplies which group is the outsiders group, through the policy context key
+`better-files.outsidersGroup`:
+
+```ts
+import { outsiderBoundary } from 'better-files/iam';
+
+await iam.api.roles.create(admin, {
+  tenantId,
+  name: 'Staff',
+  document: {
+    version: 1,
+    statements: [
+      { sid: 'Staff', effect: 'allow', actions: ['app:*'], resources: ['*'] },
+      outsiderBoundary({ actions: ['app:*', 'iam:identities:read'] }),
+    ],
+  },
+});
+```
+
+The outsiders group is one of the [records Better Files manages](/docs/guides/better-iam/managed-records): deleting or
+renaming it outside Better Files is refused, because that would turn every outsider into a full member.
+
+## Withdrawing and expiring access
+
+| What happens | Guests | Member invitations |
+| --- | --- | --- |
+| Removed before accepting | The guest invitation is revoked | The member invitation is revoked |
+| `accessDays` ends | Better IAM ends the guest's access; `dr.maintain()` marks the member expired | `dr.maintain()` removes them from the room's groups and marks them expired |
+| Removed after accepting | Taken out of the room's groups; their room role is revoked | Same |
+
+Run `dr.maintain()` on a schedule, every few minutes, so access windows end on time. See
+[maintenance and jobs](/docs/operations/maintenance-and-jobs).
+
+## Related
+
+- [Members and groups](/docs/guides/concepts/members-and-groups)
+- [NDA gating](/docs/plugins/nda): agreements that can apply only to outsiders.
+- [Release compatibility](/docs/guides/better-iam/compatibility)

@@ -1,0 +1,339 @@
+---
+title: Storage cluster
+description: Turn your own servers' disks into replicated storage with storageCluster and the better-files-node agent, with repair, drain, scrub and index rebuild.
+metaTitle: Storage cluster on your own servers
+icon: Server
+packages: ['@better-files/storage-cluster', '@better-files/storage-node']
+sources:
+  - packages/storage-cluster/src/index.ts
+  - packages/storage-cluster/src/protocol.ts
+  - packages/storage-cluster/README.md
+  - packages/storage-node/src/index.ts
+  - packages/storage-node/src/bin.ts
+  - packages/storage-node/README.md
+  - packages/cli/src/cli.ts
+  - packages/iam/src/index.ts
+  - examples/storage-cluster/better-files.ts
+  - tests/storage/cluster.test.ts
+---
+
+Some installs cannot use a cloud bucket: an on-premises deployment, a private data center, or a customer that wants
+the files on hardware it owns. A single disk is not enough either, because one failed server would lose files. The
+storage cluster turns several servers with local disks into one replicated store.
+
+It has two parts:
+
+- **The control plane**, `storageCluster` from `better-files/storage-cluster`. It is a library that runs inside your
+  app, provides the `StorageAdapter`, and keeps an index of which node holds which object.
+- **The node agent**, `better-files-node` from `better-files/storage-node`, which runs on each storage server. It
+  serves objects from its disk over HTTP and dials out to the control plane to join and send heartbeats.
+
+```ts
+import { betterFiles } from 'better-files';
+import { betterFilesIamPlugin, betterIamIntegration } from 'better-files/iam';
+import { postgresAdapter } from 'better-files/adapter-postgres';
+import { storageCluster } from 'better-files/storage-cluster';
+
+export const cluster = storageCluster({
+  // Its own handle on the database: see "The cluster index" below.
+  database: postgresAdapter({ connectionString: process.env.DATABASE_URL!, poolSize: 5 }),
+  secret: process.env.STORAGE_CLUSTER_SECRET!, // 32+ characters; node secrets derive from it
+  operatorTenant: 'ops', // whose administrators run the fleet
+  replicas: 3,
+});
+
+const plugins = [cluster.plugin /* , your other plugins */] as const;
+const iamPlugin = betterFilesIamPlugin({ plugins }); // registers better-files:storage:admin
+
+export const dr = betterFiles({
+  iam: betterIamIntegration(iam, { iamPlugin, systemCredential }),
+  database,
+  storage: cluster.storage,
+  secret: process.env.BETTER_FILES_SECRET!,
+  plugins,
+});
+
+await cluster.initialize(); // creates the cluster index tables
+await dr.initialize();
+```
+
+Then, on each storage server:
+
+```sh
+BETTER_FILES_JOIN_TOKEN=bfj_… npx better-files-node start \
+  --data /srv/better-files --control https://app.example.com/api/better-files --tenant ops \
+  --listen 0.0.0.0:7070 --advertise https://store-1.internal:7070 --zone eu-1a --capacity 2TiB
+```
+
+Nodes only ever hold ciphertext: Better Files encrypts each file before it reaches the storage adapter.
+
+## Options
+
+<TypeTable
+  type={{
+    database: {
+      type: 'DatabaseAdapter',
+      description: 'The cluster index. Give it its own handle (see below).',
+      required: true,
+    },
+    secret: {
+      type: 'string',
+      description: 'At least 32 characters. Node secrets derive from it; rotating it re-keys every node.',
+      required: true,
+    },
+    operatorTenant: {
+      type: 'string',
+      description: 'The tenant whose administrators run the fleet. Nodes join it.',
+      required: true,
+    },
+    replicas: { type: 'number', description: 'Copies of every object.', default: '2' },
+    writeQuorum: {
+      type: 'number',
+      description: 'Copies that must be written before a write succeeds.',
+      default: 'a majority of replicas',
+    },
+    heartbeatMs: { type: 'number', description: 'How often nodes report.', default: '10000' },
+    disconnectedAfterMs: {
+      type: 'number',
+      description: 'A node silent this long is disconnected: reads and placement skip it.',
+      default: '4 × heartbeatMs (40 s)',
+    },
+    lostAfterMs: {
+      type: 'number',
+      description: 'A disconnected node silent this long is lost: its copies are made again elsewhere.',
+      default: '900000 (15 min)',
+    },
+    reserveBytes: { type: 'number', description: 'Free space kept on every node.', default: '1 GiB' },
+    tokenTtlSeconds: { type: 'number', description: 'Lifetime of data-plane tokens.', default: '900 (15 min)' },
+    zone: { type: 'string', description: 'The control plane\'s own zone; reads prefer nodes in it.' },
+    fanOutBufferBytes: {
+      type: 'number',
+      description: 'Bytes buffered per replica while writing.',
+      default: '4 MiB',
+    },
+    onEvent: {
+      type: '(event: StorageClusterEvent) => void',
+      description: 'Fleet events, in addition to dr.events.',
+    },
+    fetch: { type: 'typeof fetch', description: 'Used to call the nodes.' },
+    clock: { type: '{ now(): number }', description: 'The clock, for tests.' },
+    logger: { type: '{ warn?, error? }', description: 'Where warnings and errors are logged.' },
+  }}
+/>
+
+`storageCluster()` returns:
+
+| Member | What it is |
+| --- | --- |
+| `storage` | the `StorageAdapter` to pass to `betterFiles()` |
+| `plugin` | the `storage` plugin: fleet endpoints, the agent protocol, and reconcile during `dr.maintain()` |
+| `initialize()` | creates the index tables (prefixed `better_files_storage_`) |
+| `reconcile(input?)` | one repair, trim and scrub pass (see [Repair](#repair)) |
+| `sync()` | rebuilds the index from the nodes' inventories |
+| `verify(keys)` | re-hashes every copy of the given keys now |
+| `status()`, `nodes()` | fleet summary and node list |
+| `close()` | closes the index database |
+
+### The cluster index
+
+The control plane records objects, their copies, nodes, join tokens and pending commands in its own tables. Give it
+its own database handle: Better Files can call storage while it holds a transaction on its own connection. With
+PostgreSQL, pass a separate pool (the same database is fine). With SQLite or PGlite, use a separate file.
+
+## Joining nodes
+
+A node joins once, with a **join token**: single use, expiring, created by an administrator of the operator tenant.
+
+```sh
+npx better-files storage join-token --url https://app.example.com/api/better-files --tenant ops \
+  --token $ADMIN_TOKEN --zone eu-1a
+```
+
+The CLI prints the token (`bfj_…`) and, on stderr, when it expires. Through the API,
+`dr.api.storage.createJoinToken(credential, { tenantId: 'ops', ttlSeconds?, zone? })` returns `{ token, expiresAt }`;
+`ttlSeconds` is 60 to 604,800 (7 days) and defaults to 3,600.
+
+On its first start the node presents the token to `storage.join` and receives its node id and **node secret**. It
+saves both to `<data>/node.json` (mode 0600) and reuses them on later starts; a new `--advertise` address is reported
+in the next heartbeat. A zone named on the token wins over the node's `--zone`. A token that is unknown, used or
+expired is refused with `FORBIDDEN`.
+
+The control plane stores no node secrets. It derives each one from the cluster secret, the node id and a
+**generation** (an HMAC), so it can recompute them when it needs to sign for a node.
+
+### The node agent
+
+```sh
+better-files-node start --data <dir> --control <url> --tenant <id> [--listen host:port]
+  [--advertise <url>] [--name <name>] [--zone <zone>] [--capacity <bytes|10GiB>] [--cors <origin,origin|*>]
+```
+
+| Flag | Meaning |
+| --- | --- |
+| `--data` | where objects, staged parts and the node identity live (required) |
+| `--control` | the Better Files protocol URL of the control plane (required) |
+| `--tenant` | the operator tenant (required) |
+| `--listen` | address to listen on; default `0.0.0.0:7070` |
+| `--advertise` | how the control plane and browsers reach this node; default the listening address |
+| `--name` | the node's name; default `node-` and a random suffix |
+| `--zone` | the node's failure zone (a rack, a room, a data center) |
+| `--capacity` | bytes the node may use, such as `2TiB`; default its disk's free space |
+| `--cors` | origins allowed to upload parts from a browser, comma-separated, or `*` |
+
+The join token is read from `BETTER_FILES_JOIN_TOKEN` or from stdin with `--token-stdin`, never from arguments, so it
+does not appear in shell history or process lists. It is needed on the first start only.
+
+On disk, objects live at `<data>/objects/<sha256(key)[0:2]>/<sha256(key)>`, each with a `.meta` file holding its
+key, size and SHA-256. Keys never become paths. Multipart parts are staged in `<data>/uploads/`, and writes land in
+`<data>/tmp/` before they are renamed into place.
+
+From code, `storageNode({ dataDir, controlPlane, tenantId, joinToken?, advertiseUrl?, name?, zone?, capacityBytes?,
+listen?, corsOrigins? })` returns `start()`, `stop()`, `heartbeat()` and `stats()`.
+
+## Heartbeats and data tokens
+
+Control traffic is outbound only: nodes call the control plane, and nothing needs to reach a node except data
+requests.
+
+- **Signed heartbeats.** Every 10 seconds (`heartbeatMs`) a node posts its disk stats and command results to
+  `storage.heartbeat`, signed with its node secret. The timestamp must be within 5 minutes of the control plane's clock
+  and newer than the last one accepted, so a captured heartbeat cannot be replayed. A bad signature or a stale
+  timestamp is `UNAUTHENTICATED`.
+- **Commands.** The response carries commands for the node. Today that is deletions that could not be delivered while
+  the node was away; a command sent and not confirmed within a minute is sent again.
+- **Data tokens.** Every data request to a node (`PUT`, `GET`, `HEAD`, `DELETE` on an object, multipart parts,
+  verify, inventory, stats) carries a short-lived token the control plane signed with that node's secret, naming the
+  node, the operation, the object and, for writes, the largest body allowed. A token for another node or operation is
+  refused. Only `GET /health` is open.
+
+The join and heartbeat endpoints never consult the identity system: the join token or the node's signature is the
+credential. Serve nodes over TLS (a reverse proxy works) when the network between the app and the nodes is not
+private, because tokens are bearer credentials for their one object and operation.
+
+## Placement and writes
+
+The control plane picks the nodes for each object with **weighted rendezvous hashing**: every node gets a score from
+a hash of the key and the node id, weighted by its free space. The choice is stable for a key and proportional to
+free space. It takes one node per zone first, then fills up with the best remaining nodes. Nodes that are cordoned,
+draining, disconnected, or would drop below `reserveBytes` are skipped.
+
+- **Quorum writes.** One read of the upload is streamed to every chosen node in lock step, buffering at most
+  `fanOutBufferBytes` per node, so a slow node slows the write instead of filling memory. The write succeeds when at
+  least `writeQuorum` nodes stored it and all report the same SHA-256. Otherwise the copies are removed and the write
+  fails. Missing copies are made later by reconcile.
+- **Not enough nodes.** When fewer writable nodes than `writeQuorum` exist, the write fails with `CONFLICT` ("Not
+  enough storage nodes available").
+- **Multipart uploads** stage all parts on one node, chosen like the object's first copy. Completing the upload
+  copies the file to other nodes until the quorum is reached, and the remaining copies follow in the background.
+
+## Reads and failover
+
+A read goes to the best live copy: nodes in the control plane's `zone` first, then the least full. If a node fails,
+the read tries the next copy. A node that answers 404 has its copy marked missing, and nodes that just failed a
+request are tried last for a few seconds. Range requests pass straight through.
+
+**Disconnected is not dead.** A node silent for `disconnectedAfterMs` is skipped for reads and writes, but its copies
+still count until `lostAfterMs`. A reboot therefore does not start a storm of copies.
+
+## Repair
+
+`dr.maintain()` runs `reconcile()` through the plugin; schedule maintenance every few minutes (see
+[Maintenance and jobs](/docs/operations/maintenance-and-jobs)). One control-plane instance reconciles at a time,
+through a lease in the index; another instance's run returns `{ skipped: true }`.
+
+Each pass:
+
+1. **Repairs** objects with fewer than `replicas` copies on healthy nodes: it copies from a live copy to a new node,
+   node to node through the control plane, and checks the new copy's SHA-256.
+2. **Trims** copies on draining or removed nodes once enough healthy copies exist, and extra copies once a lost node
+   returns.
+3. **Scrubs** up to 20 copies not verified in the last day: the node re-hashes each one. A mismatch marks the copy
+   corrupt; the next pass makes a new copy, then deletes the corrupt one.
+
+It returns a report: `checked`, `replicated`, `trimmed`, `failed`, `underReplicated`, `verified`, `corrupt`.
+`reconcile({ verify: n })` scrubs `n` copies instead of 20 (0 turns scrubbing off for that pass), and
+`verify(keys)` checks every copy of the given keys immediately.
+
+### Rebuilding the index
+
+`sync()` reads every connected node's inventory. Objects missing from the index, for example after restoring an
+older database backup, come back, and copies a node no longer has are marked missing so reconcile repairs them. It
+returns `{ nodes, recovered, attached, missing }`.
+
+## Maintenance on a node
+
+| Step | Endpoint | CLI |
+| --- | --- | --- |
+| Stop placing new copies on a node | `cordon` | `better-files storage cordon --node <id>` |
+| Place copies on it again | `uncordon` | `better-files storage uncordon --node <id>` |
+| Move every copy off it (reconcile copies) | `drain` | `better-files storage drain --node <id>` |
+| Return a draining node to service | `activate` | `better-files storage activate --node <id>` |
+| Remove a node | `remove` | `better-files storage remove --node <id> [--force]` |
+
+To retire a server: `drain` it, let reconcile copy everything off (the `storage.node.drained` event fires when it
+holds nothing), then `remove` it. `remove` is refused with `CONFLICT` while the node still holds copies, unless you
+pass `force`, which accepts losing them. Removal bumps the node's generation, which revokes its secret: its tokens and
+heartbeats stop verifying.
+
+## Fleet API and CLI
+
+The plugin adds these endpoints under `dr.api.storage` (and `POST /api/better-files/storage/<endpoint>`). All of them
+need `better-files:storage:admin` and work only in the operator tenant; any other tenant gets `FORBIDDEN`.
+
+| Endpoint | Input | Returns |
+| --- | --- | --- |
+| `createJoinToken` | `ttlSeconds?`, `zone?` | `{ token, expiresAt }` |
+| `nodes` | `includeRemoved?` | each node's id, name, zone, url, state, cordoned, connectivity, capacity, use, objects, version, lastSeenAt, joinedAt |
+| `status` | none | replicas, write quorum, node counts, objects, bytes, under-replicated objects, capacity and free bytes |
+| `cordon`, `uncordon`, `drain`, `activate` | `nodeId` | the node |
+| `remove` | `nodeId`, `force?` | `{ removed, droppedCopies }` |
+| `reconcile` | `verify?` | the reconcile report |
+| `sync` | none | the sync report |
+
+Pass `cluster.plugin` to `betterFilesIamPlugin({ plugins })` as well, so Better IAM knows the
+`better-files:storage:admin` action, and grant it to the operator tenant's administrators.
+
+The `better-files storage` commands call the same endpoints over HTTP:
+
+```sh
+better-files storage nodes | status | join-token [--zone z] | reconcile | sync \
+  --url <protocol url> --tenant <operator tenant> --token <bearer token>
+better-files storage drain | activate | cordon | uncordon | remove [--force] --node <id> \
+  --url <protocol url> --tenant <operator tenant> --token <bearer token>
+```
+
+`--url`, `--tenant` and `--token` fall back to `BETTER_FILES_URL`, `BETTER_FILES_TENANT` and `BETTER_FILES_TOKEN`.
+`nodes` prints one line per node; the other commands print JSON. See [CLI](/docs/operations/cli).
+
+## Fleet events
+
+| Event | When |
+| --- | --- |
+| `storage.node.joined` | a node joined with a token |
+| `storage.node.disconnected` | a node stopped sending heartbeats |
+| `storage.node.lost` | a disconnected node passed `lostAfterMs` |
+| `storage.node.reconnected` | a disconnected or lost node is back |
+| `storage.node.drained` | a draining node holds no copies any more |
+| `storage.node.removed` | a node was removed (with `droppedCopies`) |
+| `storage.object.repaired` | reconcile made a new copy |
+| `storage.replica.corrupt` | a copy was missing or failed its checksum |
+
+Connectivity changes are detected during reconcile and reported once each. Events go to `onEvent` and, once the
+plugin has run, to `dr.events` in the operator tenant, so `dr.events.subscribe('storage.*', handler)` and the
+[webhooks plugin](/docs/plugins/webhooks) receive them.
+
+## Direct uploads
+
+The cluster supports direct uploads: `presignPart` returns the staging node's part URL with a data token valid until
+the upload expires, so the browser sends encrypted parts straight to that node. Start the node with `--cors` naming
+your app's origin; the node allows `PUT` and exposes `ETag`. The browser must be able to reach the node's advertised
+URL.
+
+`presign` signs only `GET` URLs; direct writes always go through multipart uploads.
+
+## Related
+
+- [Storage overview](/docs/operations/storage)
+- [Maintenance and jobs](/docs/operations/maintenance-and-jobs)
+- [CLI](/docs/operations/cli)
+- [Encryption](/docs/operations/encryption)

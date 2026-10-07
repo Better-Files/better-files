@@ -1,0 +1,21 @@
+node_modules/
+dist/
+*.tsbuildinfo
+coverage/
+artifacts/
+work/
+*.db
+*.db-shm
+*.db-wal
+.env
+.env.*
+.npmrc
+.claude/
+*.tgz
+
+# Docs site (apps/docs): Next.js and Fumadocs build output and caches
+.next/
+.next-*/
+.source/
+apps/docs/.cache/
+next-env.d.ts

@@ -1,0 +1,73 @@
+{
+  "name": "@better-files/viewer",
+  "version": "0.1.0",
+  "description": "Secure document viewer for Better Files: server-rendered, watermarked page images and the <bf-viewer> custom element",
+  "type": "module",
+  "license": "Apache-2.0",
+  "author": "Better Files contributors",
+  "homepage": "https://github.com/Better-Files/better-files/tree/main/packages/viewer#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Better-Files/better-files.git",
+    "directory": "packages/viewer"
+  },
+  "bugs": {
+    "url": "https://github.com/Better-Files/better-files/issues"
+  },
+  "keywords": [
+    "data-room",
+    "better-iam",
+    "typescript",
+    "viewer",
+    "pdf",
+    "watermark",
+    "custom-element"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "main": "./dist/element.js",
+  "types": "./dist/element.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/element.d.ts",
+      "import": "./dist/element.js"
+    },
+    "./server": {
+      "types": "./dist/server.d.ts",
+      "import": "./dist/server.js"
+    }
+  },
+  "sideEffects": false,
+  "scripts": {
+    "build": "tsc -b"
+  },
+  "dependencies": {
+    "@better-files/core": "workspace:*",
+    "@better-files/client": "workspace:*"
+  },
+  "peerDependencies": {
+    "unpdf": ">=1.0.0",
+    "@napi-rs/canvas": ">=0.1.60"
+  },
+  "peerDependenciesMeta": {
+    "unpdf": {
+      "optional": true
+    },
+    "@napi-rs/canvas": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "unpdf": "^1.8.1",
+    "@napi-rs/canvas": "^1.0.9"
+  }
+}

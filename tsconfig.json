@@ -1,0 +1,179 @@
+{
+  "files": [],
+  "references": [
+    {
+      "path": "./packages/core"
+    },
+    {
+      "path": "./packages/adapter-sql"
+    },
+    {
+      "path": "./packages/adapter-sqlite"
+    },
+    {
+      "path": "./packages/adapter-postgres"
+    },
+    {
+      "path": "./packages/adapter-libsql"
+    },
+    {
+      "path": "./packages/adapter-pglite"
+    },
+    {
+      "path": "./packages/adapter-drizzle"
+    },
+    {
+      "path": "./packages/adapter-prisma"
+    },
+    {
+      "path": "./packages/client"
+    },
+    {
+      "path": "./packages/crypto"
+    },
+    {
+      "path": "./packages/server"
+    },
+    {
+      "path": "./packages/cli"
+    },
+    {
+      "path": "./packages/iam"
+    },
+    {
+      "path": "./packages/storage-s3"
+    },
+    {
+      "path": "./packages/jobs"
+    },
+    {
+      "path": "./packages/kms"
+    },
+    {
+      "path": "./packages/mcp"
+    },
+    {
+      "path": "./packages/middleware"
+    },
+    {
+      "path": "./packages/nestjs"
+    },
+    {
+      "path": "./packages/next"
+    },
+    {
+      "path": "./packages/plugin-ai"
+    },
+    {
+      "path": "./packages/plugin-analytics"
+    },
+    {
+      "path": "./packages/plugin-annotations"
+    },
+    {
+      "path": "./packages/plugin-audit"
+    },
+    {
+      "path": "./packages/plugin-connectors"
+    },
+    {
+      "path": "./packages/plugin-esign"
+    },
+    {
+      "path": "./packages/plugin-guard"
+    },
+    {
+      "path": "./packages/plugin-inbound"
+    },
+    {
+      "path": "./packages/plugin-links"
+    },
+    {
+      "path": "./packages/plugin-nda"
+    },
+    {
+      "path": "./packages/plugin-network"
+    },
+    {
+      "path": "./packages/plugin-notifications"
+    },
+    {
+      "path": "./packages/plugin-processing"
+    },
+    {
+      "path": "./packages/plugin-qa"
+    },
+    {
+      "path": "./packages/plugin-quotas"
+    },
+    {
+      "path": "./packages/plugin-redaction"
+    },
+    {
+      "path": "./packages/plugin-retention"
+    },
+    {
+      "path": "./packages/plugin-reviews"
+    },
+    {
+      "path": "./packages/plugin-scan"
+    },
+    {
+      "path": "./packages/plugin-search"
+    },
+    {
+      "path": "./packages/plugin-sync"
+    },
+    {
+      "path": "./packages/plugin-tasks"
+    },
+    {
+      "path": "./packages/plugin-templates"
+    },
+    {
+      "path": "./packages/plugin-watermark"
+    },
+    {
+      "path": "./packages/plugin-webhooks"
+    },
+    {
+      "path": "./packages/react"
+    },
+    {
+      "path": "./packages/storage-azure"
+    },
+    {
+      "path": "./packages/storage-cluster"
+    },
+    {
+      "path": "./packages/storage-fs"
+    },
+    {
+      "path": "./packages/storage-gcs"
+    },
+    {
+      "path": "./packages/storage-node"
+    },
+    {
+      "path": "./packages/storage-regional"
+    },
+    {
+      "path": "./packages/svelte"
+    },
+    {
+      "path": "./packages/testing"
+    },
+    {
+      "path": "./packages/viewer"
+    },
+    {
+      "path": "./packages/vue"
+    },
+    {
+      "path": "./packages/better-files"
+    },
+    {
+      "path": "./packages/telemetry"
+    }
+  ]
+}

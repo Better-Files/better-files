@@ -1,0 +1,62 @@
+{
+  "name": "@better-files/plugin-search",
+  "version": "0.1.0",
+  "description": "Search for Better Files: names and (opt-in) document text, filtered by the caller's permissions.",
+  "type": "module",
+  "license": "Apache-2.0",
+  "author": "Better Files contributors",
+  "homepage": "https://github.com/Better-Files/better-files/tree/main/packages/plugin-search#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Better-Files/better-files.git",
+    "directory": "packages/plugin-search"
+  },
+  "bugs": {
+    "url": "https://github.com/Better-Files/better-files/issues"
+  },
+  "keywords": [
+    "data-room",
+    "better-iam",
+    "typescript",
+    "search",
+    "full-text",
+    "plugin"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "sideEffects": false,
+  "scripts": {
+    "build": "tsc -b"
+  },
+  "dependencies": {
+    "@better-files/core": "workspace:*"
+  },
+  "peerDependencies": {
+    "unpdf": ">=1"
+  },
+  "peerDependenciesMeta": {
+    "unpdf": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "unpdf": "^1.8.1"
+  }
+}

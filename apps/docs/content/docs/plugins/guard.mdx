@@ -1,0 +1,217 @@
+---
+title: Download guard
+description: Download rate limits per person and room, anomaly reports, and Better IAM threat detection that stops risky accounts from downloading.
+metaTitle: Download rate limits and threat response
+icon: ShieldAlert
+packages: ['@better-files/plugin-guard']
+sources:
+  - packages/plugin-guard/src/index.ts
+  - packages/plugin-guard/README.md
+  - packages/core/src/plugin.ts
+  - packages/server/src/endpoints/nodes.ts
+  - tests/plugins/guard-threats.test.ts
+  - tests/plugins/scan-guard.test.ts
+---
+
+A bidder who downloads a whole room in ten minutes, or a stolen session pulling every file, looks different from
+normal reading. Security teams want such bulk downloads stopped at a limit, reported once, and answered: raise the
+account's risk, end its sessions, notify someone.
+
+The guard plugin limits how many downloads one person may make in one room within a time window. At the limit the
+request is refused, a `security.download-anomaly` event is emitted, and your `onAnomaly` handler runs. With
+`betterIamThreats`, it also raises the person's risk in Better IAM, and refuses downloads to anyone Better IAM rates
+as risky, in every room.
+
+```ts
+import { betterFiles } from 'better-files';
+import { guardPlugin } from 'better-files/plugin-guard';
+
+export const dr = betterFiles({
+  /* iam, database, storage, secret */
+  plugins: [guardPlugin({ maxDownloads: 100, windowMs: 10 * 60_000 })],
+});
+```
+
+The guard adds no endpoints, actions or tables. It reads counts from the room's activity log, so the limit holds
+across servers and restarts. Passing it to `betterFilesIamPlugin({ plugins })` is harmless but not needed.
+
+## Options
+
+<TypeTable
+  type={{
+    maxDownloads: {
+      type: 'number',
+      description: 'Downloads one person may make in one room per window.',
+      default: '100',
+    },
+    windowMs: { type: 'number', description: 'The window, in milliseconds. It slides.', default: '10 minutes' },
+    countViews: {
+      type: 'boolean',
+      description: 'Count viewer opens as well as downloads.',
+      default: 'false',
+    },
+    exempt: {
+      type: 'readonly string[]',
+      description: 'Room relations exempt from the limit, checked against the room roster.',
+      default: "['owner', 'admin']",
+    },
+    onAnomaly: {
+      type: '(anomaly: DownloadAnomaly, context: PluginContext) => Promise<void> | void',
+      description: 'Called once per window when someone crosses the limit. Errors are logged, never shown to the caller.',
+    },
+    risk: {
+      type: 'RiskGate',
+      description: 'Refuse downloads and views from people the identity system rates risky: { level?, lookup }.',
+    },
+  }}
+/>
+
+## What counts
+
+The guard runs as a `beforeDownload` hook, when a download ticket is requested:
+
+- Each `document.downloaded` entry of the person in the room within the window counts one, and each
+  `document.viewed` entry too with `countViews: true`.
+- A folder ZIP (`folders.requestDownload`) counts every file in it, both while the ZIP is assembled and in later
+  requests.
+- Views are not limited unless `countViews` is on.
+- People whose own relation on the room is in `exempt` are not limited.
+
+## At the limit
+
+The request that would go over is refused with `RATE_LIMITED` (HTTP 429), with `details: { limit, windowMs }`. Once
+per window per person and room, also across servers, the guard:
+
+1. writes `security.download-anomaly` to the room's activity log, with `count`, `limit` and `windowMs`;
+2. emits the `security.download-anomaly` event right away, even though the request is refused;
+3. calls `onAnomaly`.
+
+A `DownloadAnomaly` has `tenantId`, `roomId`, `principalId`, `principalKind` (`user`, `service` or `agent`), `email`,
+`ip` and `sessionId` (when known), `count` (including the refused download), `windowMs` and `limit`.
+
+```ts
+guardPlugin({
+  maxDownloads: 50,
+  onAnomaly: async (anomaly) => {
+    await pageSecurity(`${anomaly.email ?? anomaly.principalId} hit ${anomaly.count} downloads in ${anomaly.roomId}`);
+  },
+});
+```
+
+## Risky accounts
+
+With `risk`, every download and view is first checked against the person's risk level, in every room and whatever
+their role, owners included. People at `risk.level` or above (default `high`) are refused with `FORBIDDEN` and
+`details: { reason: 'risk', riskLevel }`. Levels are `none`, `low`, `medium` and `high`.
+
+If the lookup fails, the error is logged and the download is allowed (it fails open), so an identity-system outage
+does not close every room.
+
+To use another identity system, pass your own gate:
+
+```ts
+guardPlugin({
+  risk: { level: 'medium', lookup: async ({ tenantId, principalId }) => myRiskService.level(tenantId, principalId) },
+});
+```
+
+## Better IAM threat response
+
+`betterIamThreats(iam, options)` returns `onAnomaly` and `risk` options wired to Better IAM's threat API
+(`threats.setRisk`, `threats.respond`, `threats.getRisk`; better-iam 0.2 or later). Spread it into the guard's
+options:
+
+```ts
+import { betterIamThreats, guardPlugin, threatsPolicy } from 'better-files/plugin-guard';
+
+const guard = guardPlugin({
+  maxDownloads: 50,
+  ...betterIamThreats(iam, {
+    // A service account API key whose role carries threatsPolicy().
+    credential: (tenantId) => ({ token: securityKeys[tenantId] }),
+    actions: [{ kind: 'revoke-sessions' }, { kind: 'notify' }],
+  }),
+});
+```
+
+- **When someone crosses the limit**, their Better IAM risk is raised (`setRisk`) for a while. Policies see it as
+  `principal.riskLevel`. The `actions` then run through `threats.respond` on the identity. `block-network` runs
+  separately and blocks the request's IP address. Only `user` and `agent` principals are raised; other principals
+  are left to the event.
+- **When Better IAM rates someone risky**, for this or any other reason, the `risk` gate refuses their downloads and
+  views in every room. Lookups are cached per tenant and person.
+
+<TypeTable
+  type={{
+    credential: {
+      type: '(tenantId: string) => Credential',
+      description: 'The credential for the threat API, per tenant (may also return a promise): a service account whose role grants threatsPolicy().',
+      required: true,
+    },
+    raiseRisk: {
+      type: "'low' | 'medium' | 'high' | false",
+      description: 'The risk floor set on someone who crosses the limit. false leaves the risk unchanged.',
+      default: "'high'",
+    },
+    riskExpiresInMs: {
+      type: 'number',
+      description: 'How long the raised floor holds: one hour to 90 days.',
+      default: '24 hours',
+    },
+    actions: {
+      type: 'ThreatResponseAction[]',
+      description: "Responses run in order: revoke-sessions (keepApiKeys?), forget-devices, contain, block-network (durationMs?), notify.",
+      default: '[]',
+    },
+    blockAt: {
+      type: "'low' | 'medium' | 'high' | false",
+      description: 'Refuse downloads from people at this level or above. false disables the gate.',
+      default: "'high'",
+    },
+    cacheMs: {
+      type: 'number',
+      description: 'How long a risk lookup is reused, per tenant and person.',
+      default: '30 seconds',
+    },
+  }}
+/>
+
+`threatsPolicy()` returns the Better IAM policy for that service account: `iam:threats:read` and
+`iam:threats:respond` on `iam/*`. To add your own handling as well, wrap the returned `onAnomaly`:
+
+```ts
+const threats = betterIamThreats(iam, { credential });
+guardPlugin({
+  ...threats,
+  onAnomaly: async (anomaly, context) => {
+    await threats.onAnomaly?.(anomaly, context);
+    await pageSecurity(anomaly);
+  },
+});
+```
+
+## Permissions
+
+The guard does not change capabilities in the permission matrix (layer A) or add Better IAM actions (layer B). It
+refuses individual download and view requests after both layers allowed them. Its Better IAM side runs through the
+service account given to `betterIamThreats`, not through the caller.
+
+## Errors
+
+| Code | When |
+| --- | --- |
+| `RATE_LIMITED` | the download would go over `maxDownloads` in the window |
+| `FORBIDDEN` | the person's risk level is at or above the gate (`details.reason` is `risk`) |
+
+## Limits
+
+- Counts are per person and per room. Downloads spread across many rooms are limited room by room; the risk gate is
+  the tenant-wide control.
+- The refusal carries no retry time.
+- [Share link](/docs/plugins/links) downloads do not pass through the guard.
+
+## Related
+
+- [Watermarking](/docs/plugins/watermark)
+- [Network rules](/docs/plugins/network)
+- [Better IAM integration](/docs/guides/better-iam)

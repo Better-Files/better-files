@@ -1,0 +1,201 @@
+---
+title: Annotations
+description: Notes and highlights on documents, anchored to a page and area, with replies, resolution, and private, group or room-wide visibility.
+metaTitle: Document annotations for data rooms
+icon: FilePenLine
+packages: ['@better-files/plugin-annotations']
+sources:
+  - packages/plugin-annotations/src/index.ts
+  - packages/plugin-annotations/README.md
+  - packages/core/src/plugin.ts
+  - packages/core/src/operations.ts
+  - packages/server/src/pipeline.ts
+  - tests/plugins/annotations.test.ts
+---
+
+Reviewers mark up what they read. A buyer's lawyer highlights the change-of-control clause and writes "ask about
+this"; their colleagues on the same team should see it, and the other bidders must not. The sell side wants to leave
+guidance on a document for everyone, such as "schedules are in folder 4". And some notes are only for the person who
+wrote them.
+
+The annotations plugin stores notes on documents, optionally anchored to a page, an area of the page and the quoted
+text. Each note picks its audience: **private**, one **group**, or the whole **room**. Notes can have replies and can
+be resolved.
+
+```ts
+import { betterFiles } from 'better-files';
+import { annotationsPlugin } from 'better-files/plugin-annotations';
+
+const plugins = [annotationsPlugin()] as const;
+
+export const dr = betterFiles({ /* iam, database, storage, secret */ plugins });
+
+// A private highlight on page 3.
+await dr.api.annotations.create(credential, {
+  tenantId,
+  nodeId: documentId,
+  body: 'Check the MAC clause',
+  page: 3,
+  rect: { x: 0.1, y: 0.2, width: 0.5, height: 0.05 },
+  quote: 'Material Adverse Change',
+});
+
+// A note for the caller's team.
+await dr.api.annotations.create(credential, {
+  tenantId,
+  nodeId: documentId,
+  body: 'Ask about earn-out',
+  visibility: 'group',
+});
+
+// Every note the caller may read on the document.
+const notes = await dr.api.annotations.list(credential, { tenantId, nodeId: documentId });
+```
+
+The plugin adds no Better IAM actions: every endpoint is authorized as `better-files:documents:view` with the `VIEW`
+capability on the document, the same check as opening it. Passing it to `betterFilesIamPlugin({ plugins })` is
+harmless but not needed. The plugin owns one table, `annotations`. On a SQL database, run `better-files generate` and
+`better-files migrate` after adding it.
+
+## Options
+
+<TypeTable
+  type={{
+    maxLength: {
+      type: 'number',
+      description: 'The longest note body, in characters, for create and update.',
+      default: '10000',
+    },
+  }}
+/>
+
+## Visibility
+
+| Visibility | Who reads it | Who may create it |
+| --- | --- | --- |
+| `private` (default) | The author only | Anyone who may view the document |
+| `group` | Members of one permission group of the room | Members of that group |
+| `room` | Everyone who may view the document | People with the `EDIT` capability on the document |
+
+- **Private notes are private from administrators too.** Nobody but the author can read, edit, resolve or delete one,
+  and it is never published as an event.
+- **Group notes** name a permission group with `groupId`. Leave `groupId` out when the author belongs to exactly one
+  group of the room, and that group is used. Naming a group the author is not in fails with `FORBIDDEN`; naming none
+  while in zero or several groups fails with `INVALID_INPUT`. Membership is checked against the reader's current
+  Better IAM groups each time, so someone who leaves the group stops seeing its notes.
+- **Room notes** need `EDIT` on the document, which is meant for the sell side's guidance. Anyone else gets
+  `FORBIDDEN`.
+
+Room administrators do not see other people's private notes or the notes of groups they are not in. In the test
+suite, the room owner sees only the room-wide note while a bidder's private and group notes stay hidden.
+
+## Anchors
+
+- `page` is 1-based, up to 100,000. Leave it out for a note on the whole document.
+- `rect` is an area on the page as fractions of its width and height, from 0 to 1, with the origin at the top left.
+  Because it is relative, it lines up at any rendering size, including in the viewer.
+- `quote` keeps the highlighted text, up to 2,000 characters.
+- Each note records the `versionId` that was current when it was written. `list` can filter by version, so notes on
+  an older version can be shown separately after a new upload.
+
+## Endpoints
+
+Each endpoint is on `dr.api.annotations` on the server and `client.annotations` in the browser. All inputs also take
+`tenantId`.
+
+### create
+
+<TypeTable
+  type={{
+    nodeId: { type: 'string', description: 'The document. Folders are refused with INVALID_INPUT, and a document without content yet with CONFLICT.', required: true },
+    body: { type: 'string', description: 'The note, 1 to maxLength characters, trimmed.', required: true },
+    visibility: { type: "'private' | 'group' | 'room'", description: 'Who reads it. Ignored for replies.', default: "'private'" },
+    groupId: { type: 'string', description: 'The permission group of a group note.' },
+    page: { type: 'number', description: '1-based page number.' },
+    rect: { type: '{ x: number; y: number; width: number; height: number }', description: 'Area on the page, each value from 0 to 1.' },
+    quote: { type: 'string', description: 'The highlighted text, up to 2,000 characters.' },
+    parentId: { type: 'string', description: 'The note this one replies to.' },
+  }}
+/>
+
+A reply takes its parent's visibility, group and version, so it is read by exactly the people who read the note it
+answers. The parent must be on the same document and readable by the caller; otherwise the call fails with
+`NOT_FOUND`.
+
+### list
+
+`dr.api.annotations.list(credential, { tenantId, nodeId, versionId?, includeResolved? })` returns the notes the caller
+may read, oldest first, up to 2,000 per document before filtering. Each note has `mine: true` when the caller wrote
+it, and group notes carry `groupName`. Resolved threads, meaning a resolved top-level note and its replies, are left
+out unless `includeResolved: true`. It works on closed rooms.
+
+### update
+
+`dr.api.annotations.update(credential, { tenantId, annotationId, body?, resolved? })` edits or resolves a note the
+caller can read.
+
+- Only the author may change `body`; anyone else gets `FORBIDDEN`.
+- Any reader of a shared note may set `resolved: true` or `false`. Resolving records `resolvedAt` and `resolvedBy`.
+
+### delete
+
+`dr.api.annotations.delete(credential, { tenantId, annotationId })` removes a note and its direct replies, and returns
+`{ deleted: true }`.
+
+- The author may always delete their note.
+- A moderator, meaning someone with the `MANAGE` capability on the document, may delete shared notes they can read.
+- A private note of someone else, or a group note of a group the caller is not in, fails with `NOT_FOUND`.
+- A reader without `MANAGE` gets `FORBIDDEN`.
+
+## Events and activity
+
+`create` appends `annotation.created` to the room's activity log with the document's `nodeId` and metadata
+`visibility` (and `reply: true` for replies). The log records that a note exists, never its text. Private notes are
+recorded too, so administrators can see that someone wrote a private note on a document, but not what it says.
+
+For `group` and `room` notes, `create` also emits an `annotation.created` event with `nodeId`, `annotationId`,
+`visibility` and `groupId` for group notes. Private notes emit nothing. `update` and `delete` record no activity and
+emit no events.
+
+## In the browser
+
+```tsx
+const notes = useQuery(`annotations:${documentId}`, (client) =>
+  client.annotations.list({ nodeId: documentId }),
+);
+
+const resolve = useAction(
+  (client, annotationId: string) => client.annotations.update({ annotationId, resolved: true }),
+  'annotations:',
+);
+```
+
+## Room state and NDAs
+
+`create`, `update` and `delete` fail with `ROOM_CLOSED` in a closed or archived room; `list` still works. Because
+every call needs `VIEW` on the document, anything that removes `VIEW`, such as a pending
+[NDA](/docs/plugins/nda) or a permission entry, also hides the document's notes.
+
+## Errors
+
+| Code | When |
+| --- | --- |
+| `INVALID_INPUT` | Input fails validation, the node is a folder, or a group note names no group and the author is not in exactly one. |
+| `NOT_FOUND` | The note does not exist, the caller cannot read it, or a reply's parent is on another document. |
+| `FORBIDDEN` | Sharing with a group you are not in, a room note without `EDIT`, editing someone else's note, or deleting a shared note without `MANAGE`. |
+| `CONFLICT` | The document has no content yet. |
+| `ROOM_CLOSED` | A mutating call on a closed or archived room. |
+
+## Limits
+
+- Note bodies up to `maxLength` (10,000 by default), quotes 2,000 characters, pages up to 100,000.
+- `list` reads at most 2,000 notes per document.
+- Deleting a note removes its direct replies only. Replies to replies are allowed by `create` but are not removed with
+  the top-level note, and resolving a thread hides only the top-level note and its direct replies.
+
+## Related
+
+- [Q&A](/docs/plugins/qa): turn a team note into a formal question to the seller.
+- [Redaction](/docs/plugins/redaction): remove sensitive text from the document itself.
+- [NDA gating](/docs/plugins/nda): notes stay hidden until the NDA is accepted.
+- [React](/docs/frameworks/react): `useQuery` and `useAction`.

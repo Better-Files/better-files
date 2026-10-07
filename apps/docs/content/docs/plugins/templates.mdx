@@ -1,0 +1,181 @@
+---
+title: Room templates
+description: Start rooms from folder skeletons, permission groups, security settings and checklists, built in or saved per tenant, and duplicate rooms.
+metaTitle: Data room templates and room duplication
+icon: Layers
+packages: ['@better-files/plugin-templates']
+sources:
+  - packages/plugin-templates/src/index.ts
+  - packages/plugin-templates/README.md
+  - packages/plugin-templates/package.json
+  - packages/core/src/plugin.ts
+  - tests/plugins/templates-tasks.test.ts
+  - tests/plugins/duplicate.test.ts
+---
+
+Most data rooms of one kind look alike. A sell-side M&A room has the same index of folders every time, a group per
+bidder, downloads behind MFA, and a closing checklist. Setting that up by hand for each deal is slow, and small
+differences between rooms lead to mistakes, such as a bidder group that can see a folder it should not.
+
+The templates plugin describes a room's structure as data: folders, permission groups, the access each group has on
+each folder, security settings and checklists. It ships six templates, lets each tenant save its own, captures a
+template from an existing room, and duplicates rooms. Documents and people are never part of a template.
+
+```ts
+import { betterFiles } from 'better-files';
+import { betterFilesIamPlugin } from 'better-files/iam';
+import { tasksPlugin } from 'better-files/plugin-tasks';
+import { templatesPlugin } from 'better-files/plugin-templates';
+
+const plugins = [templatesPlugin(), tasksPlugin()] as const; // tasksPlugin for checklists
+const iamPlugin = betterFilesIamPlugin({ plugins }); // registers better-files:templates:manage
+
+export const dr = betterFiles({ /* iam, database, storage, secret */ plugins });
+
+const { room, folders, groups, tasks, access } = await dr.api.templates.createRoom(credential, {
+  tenantId,
+  templateId: 'm-and-a-sell-side',
+  name: 'Project Orion',
+});
+```
+
+`templatesPlugin()` takes no options. It owns one table, `roomTemplates`, for templates tenants save; on a SQL
+database, run `better-files generate` and `better-files migrate` after adding it.
+
+## Built-in templates
+
+Every installation offers these (`builtInTemplates` exports them):
+
+| `id` | Name | Folders | Groups | Settings | Checklist |
+| --- | --- | --- | --- | --- | --- |
+| `m-and-a-sell-side` | M&A sell-side | Corporate, Financial, Legal, Commercial, Human resources, Intellectual property, Information technology, Real estate, Tax; Corporate, Financial, Legal and Human resources have subfolders | Sell side, Advisors, Bidder A, Bidder B | MFA for downloads, `confidential` | Closing (4 tasks) |
+| `fundraising` | Fundraising | Pitch deck, Financial model, Cap table, Legal, Product, Team | Company, Investors | Downloads off | None |
+| `board-portal` | Board portal | Board packs, Minutes, Committee papers, Policies, Resolutions | Directors, Company secretary | MFA for downloads | None |
+| `real-estate` | Real-estate transaction | Title, Surveys and inspections, Leases, Financing, Closing documents | Seller, Buyer, Agents | None | Transaction (4 tasks) |
+| `audit-evidence` | Audit evidence | Requests, Policies and procedures, Access reviews, Change management, Incident response, Vendor management | Control owners, Auditors | None | None |
+| `litigation` | Litigation | Pleadings, Correspondence, Discovery, Expert reports, Evidence, Court orders | Legal team, Counsel | MFA for downloads, `privileged` | None |
+
+Built-in templates cannot be changed or deleted (`CONFLICT`). To adjust one, apply it, change the room, and capture
+the room as a tenant template.
+
+## The template format
+
+A template is plain JSON, so you can keep templates in your repository and save them per tenant at deploy time.
+
+```ts
+await dr.api.templates.save(credential, {
+  tenantId,
+  definition: {
+    name: 'Vendor due diligence',
+    description: 'Security and compliance evidence from a supplier.',
+    groups: [
+      { name: 'Security team', kind: 'internal', relation: 'editor', preset: 'editor' },
+      { name: 'Vendor', kind: 'external', relation: 'contributor', preset: 'contributor' },
+    ],
+    folders: [
+      {
+        name: 'Security',
+        children: [{ name: 'Pen tests', access: [{ group: 'Vendor', preset: 'view', locked: true }] }],
+      },
+      { name: 'Policies' },
+    ],
+    settings: { requireMfaForDownload: true, classification: 'confidential' },
+    checklists: [{ name: 'Onboarding', tasks: [{ title: 'Upload the SOC 2 report', dueInDays: 14 }] }],
+  },
+});
+```
+
+<TypeTable
+  type={{
+    name: { type: 'string', description: 'Up to 120 characters.', required: true },
+    description: { type: 'string', description: 'Up to 1000 characters.' },
+    folders: {
+      type: 'FolderSpec[]',
+      description: 'Up to 200 top-level folders, nested at most six levels deep, each level up to 100 children. A folder is { name, children?, access? }.',
+      required: true,
+    },
+    groups: {
+      type: '{ name; kind?; relation?; preset? }[]',
+      description: "Up to 50 permission groups. kind is internal, external or auditor; relation is the room relation (viewer, contributor, editor, publisher, auditor); preset is the group's access preset on the room.",
+    },
+    settings: {
+      type: '{ downloadsEnabled?; printEnabled?; requireMfaForDownload?; classification? }',
+      description: 'Room security settings. classification is lowercase letters, digits, underscores and hyphens, up to 64 characters.',
+    },
+    checklists: {
+      type: '{ name; tasks: { title; description?; dueInDays? }[] }[]',
+      description: 'Up to 20 checklists of up to 200 tasks. dueInDays (0 to 3650) sets the due date relative to when the template is applied.',
+    },
+  }}
+/>
+
+A folder's `access` lists up to 50 entries `{ group, preset?, capabilities?, locked? }`. `group` names a group by its
+name (compared without case). An entry uses `capabilities` when given, otherwise `preset`, otherwise `view`. Entries
+for groups that do not exist in the room are dropped without an error. See [capabilities](/docs/reference/capabilities)
+for preset and capability names.
+
+`templateSchema` (the validation schema) and the `RoomTemplateDefinition` type are exported for checking templates in
+your own code.
+
+## Endpoints
+
+| Endpoint | Input | Permission | What it does |
+| --- | --- | --- | --- |
+| `templates.list` | none | `better-files:rooms:create` on the tenant | Built-in and tenant templates, each with `id` and `builtIn` |
+| `templates.save` | `definition`, `templateId?` | `better-files:templates:manage` on the tenant | Creates a tenant template, or replaces the one named by `templateId` |
+| `templates.delete` | `templateId` | `better-files:templates:manage` on the tenant | Deletes a tenant template |
+| `templates.apply` | `roomId`, `templateId` | `better-files:admin` on the room | Applies a template to an existing room |
+| `templates.createRoom` | `templateId`, `name`, `description?` | `better-files:rooms:create` on the tenant | Creates a room and applies the template |
+| `templates.capture` | `roomId`, `name?`, `save?` | `better-files:templates:manage` on the tenant | Builds a template from a room; stores it when `save` is true |
+| `templates.duplicateRoom` | `roomId`, `name`, `description?` | `better-files:rooms:create` on the tenant | Creates a room with another room's structure |
+
+`apply`, `createRoom` and `duplicateRoom` return the counts of what they created: `{ folders, groups, access, tasks }`,
+and `createRoom` and `duplicateRoom` also the new `room`.
+
+The plugin grants `better-files:templates:manage` to no room relation; it is a tenant-level action, so give it to
+the people who curate templates through your Better IAM policies (see [Better IAM](/docs/guides/better-iam) and
+[actions](/docs/reference/actions)).
+
+## How a template is applied
+
+Applying runs the regular operations as the caller (`groups.create`, `folders.create`, `permissions.setEntries`,
+`rooms.update`, `tasks.create`), so both layers of authorization apply to each step:
+
+1. Groups the room does not have yet (by name, without case) are created.
+2. Folders are created from the root down. A folder that already exists under the same parent with the same name is
+   kept. Each folder's `access` entries are set on it.
+3. Settings are applied with `rooms.update`.
+4. Each checklist task is created with `tasks.create`, due `dueInDays` after now.
+
+Applying a template again to the same room adds no folders or groups, but it creates the checklist tasks again, so a
+second apply duplicates checklists. Without the tasks plugin (`tasksPlugin` from `better-files/plugin-tasks`), the `tasks.create` operation does
+not exist and checklists are skipped; the rest applies.
+
+`templates.apply` records `template.applied` in the room's activity log, with the template id and the counts.
+`createRoom` and `duplicateRoom` record no such entry of their own; the room and folder operations they run are
+logged as usual.
+
+## Capture and duplicate a room
+
+`templates.capture` reads a room into a template:
+
+- **Folders.** The folder tree in its order, without documents or deleted folders.
+- **Access.** Each group's entries on each folder, as a preset name when the mask matches a preset exactly, otherwise
+  as capability names, with `locked`. Entries for individual people are left out.
+- **Groups.** Name, kind, relation, and the preset of the group's entry on the root folder.
+- **Settings.** `downloadsEnabled`, `printEnabled`, `requireMfaForDownload` and `classification`.
+- **Checklists.** Task titles and descriptions grouped by checklist, when the tasks plugin is installed. Due dates
+  are not captured.
+
+Because a template shows every folder, group and access entry, including ones hidden from the caller, capturing also
+calls `permissions.getMatrix` on the room's root, which needs `MANAGE` on the whole room. The default name is
+`{room name} (template)`. Without `save: true` the template is returned with `id: null` and not stored.
+
+`templates.duplicateRoom` captures a room and applies the result to a new room in one call. Members are not copied:
+invite people to the new room yourself.
+
+## Related
+
+- [Capabilities and presets](/docs/reference/capabilities)
+- [Better IAM](/docs/guides/better-iam)
+- [Operations](/docs/reference/operations)

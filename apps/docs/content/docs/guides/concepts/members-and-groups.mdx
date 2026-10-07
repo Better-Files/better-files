@@ -1,0 +1,252 @@
+---
+title: Members and groups
+description: Invite people to a room, give them room roles, organize them in permission groups, and end their access on a date.
+metaTitle: Room members, roles and permission groups
+icon: Users
+packages: ['@better-files/server', '@better-files/core', '@better-files/iam']
+sources:
+  - packages/server/src/endpoints/people.ts
+  - packages/server/src/index.ts
+  - packages/server/src/access.ts
+  - packages/core/src/operations.ts
+  - packages/core/src/tables.ts
+  - packages/iam/src/index.ts
+  - examples/quickstart/index.ts
+---
+
+A room has two kinds of people. Your own colleagues run it: they upload, organize, set permissions and invite. Outside
+parties, such as bidders, auditors and their advisers, read it, often in several competing teams, each of which must
+see only its own share and lose access when the process ends.
+
+Better Files handles this with **members** (the room's roster), **room relations** (each person's role on the room in
+Better IAM) and **permission groups** (teams that hold matrix entries together).
+
+```ts
+// A team with watermarked downloads across the whole room.
+const buyers = await dr.api.groups.create(credential, {
+  tenantId,
+  roomId,
+  name: 'Buyers',
+  kind: 'external',
+  preset: 'download',
+});
+
+// Invite someone into it for 30 days.
+await dr.api.members.invite(credential, {
+  tenantId,
+  roomId,
+  email: 'ben@buyer.example',
+  groupIds: [buyers.id],
+  accessDays: 30,
+});
+```
+
+## Room relations
+
+A **relation** is a person's or a group's role on the room, stored in Better IAM as a relationship to
+`better-files-room/{roomId}`. It decides which **actions** they may perform (layer B of
+[permissions](/docs/guides/concepts/permissions)); the permission matrix still decides which folders and documents they
+reach. The core access model grants:
+
+| Relation | May |
+| --- | --- |
+| `viewer` | Read the room; list, view and download content, and read versions, wherever the matrix allows. |
+| `contributor` | Everything a viewer may, plus upload. |
+| `editor` | Everything a contributor may, plus edit, delete, restore and manage versions. |
+| `publisher` | Everything an editor may, plus publish the room, see the roster and invite people into groups. |
+| `admin` | Everything a publisher may, plus update, close, reopen, archive and export the room, manage and remove members and groups, manage permissions, and read and export the activity log. Holds every capability on every node. |
+| `owner` | Everything an admin may, plus delete the room, and grant or take away ownership. |
+| `auditor` | Everything a viewer may, plus see the roster and read and export the activity log. Can list and view every node, whatever the matrix says. |
+
+The relations are not a ladder of capabilities: a `contributor` without a matrix entry that grants `UPLOAD` on a folder
+cannot upload there. Only `owner` and `admin` (every capability) and `auditor` (`LIST` and `VIEW`) hold capabilities
+on every node through their relation alone. See [Access model](/docs/guides/better-iam/access-model) for how Better
+IAM evaluates them and how your own policies combine with them.
+
+The person who creates a room becomes its `owner`. A room always keeps at least one active owner: removing or demoting
+the last one is a `CONFLICT`.
+
+## Members
+
+A **member** is a row on the room's roster. Better IAM's groups and relationships are what grant access; the roster
+records who was invited, by whom, into which groups, with which direct relation, and until when.
+
+| Field | Meaning |
+| --- | --- |
+| `id` | The member id, used by `remove`, `setRole`, `suspend` and `resume`. |
+| `identityId` | The Better IAM identity, once known. Absent while an outsider's invitation is pending. |
+| `email` | The address they were invited at. |
+| `status` | `invited`, `active`, `suspended`, `removed` or `expired`. |
+| `relation` | Their direct relation on the room, if any. Relations held through groups are not listed here. |
+| `groupIds` | The room's permission groups they belong to. |
+| `guest` | Whether Better IAM treats them as from outside the organization. |
+| `invitedBy`, `expiresAt` | Who invited them, and when their access window ends. |
+
+`members.list({ roomId, includeRemoved? })` returns the roster, oldest first, without removed members unless asked.
+It needs `better-files:members:read` (owners, admins, publishers and auditors).
+
+### Invite
+
+`members.invite` (`better-files:members:invite`: owners, admins, publishers) takes:
+
+<TypeTable
+  type={{
+    roomId: { type: 'string', description: 'The room.', required: true },
+    email: { type: 'string', description: 'The person\'s email address.', required: true },
+    groupIds: { type: 'string[]', description: 'Up to 20 permission groups of the room to add them to.' },
+    relation: {
+      type: 'RoomRelation',
+      description: 'A direct relation. Needs better-files:members:manage (owners, admins); owner needs the owner relation.',
+    },
+    accessDays: {
+      type: 'number',
+      description: '1 to 365. Their access ends this many days from now (see Access windows).',
+    },
+    message: { type: 'string', description: 'Up to 1,000 characters, passed to the invitation for outsiders.' },
+  }}
+/>
+
+What happens depends on whether Better IAM already knows the email address:
+
+- **Someone in the organization** (an identity with that email exists): they are added to the groups in Better IAM and
+  given the relation, and become `active` at once. Invited with neither groups nor a relation, they get the `viewer`
+  relation, so they hold something in the room. Inviting an existing member again adds the new groups to theirs, and
+replaces their relation only when you give a different one.
+- **Someone from outside**: they must be invited into at least one group, and cannot be given a direct relation until
+  they have joined (both `INVALID_INPUT`). Better IAM creates an invitation for them that adds them to the groups when they
+  accept, and the member is `invited`, with `guest: true`. Inviting a pending address again is a `CONFLICT`. See
+  [Outsiders](/docs/guides/better-iam/outsiders) for guests, member invitations on Better IAM releases without guests,
+  and how outsiders are kept apart.
+
+Invitations are **claimed on first sign-in**: the first time a person calls Better Files, any `invited` rows for their
+email address in that tenant get their identity id and become `active`, and `member.joined` is emitted for each room.
+
+Every invitation records `member.invited` in the activity log, emits the same event, and is written to Better IAM's
+audit chain.
+
+### Invite many
+
+`members.inviteMany` invites up to 500 people at once, from a list, a CSV, or both:
+
+```ts
+const result = await dr.api.members.inviteMany(credential, {
+  tenantId,
+  roomId,
+  csv: [
+    'email,groups,role,days',
+    'ben@buyer.example,Buyers,,30',
+    'cara@buyer.example,Buyers;Advisers,,30',
+    'dan@acme.example,,editor,',
+  ].join('\n'),
+  message: 'Welcome to Project Falcon',
+});
+// result: { invited, failed, results: [{ email, ok, status?, error?: { code, message } }, ...] }
+```
+
+- The CSV columns are `email`, `groups`, `role` and `days`. With a header row (one that contains `email`), columns are
+  found by name and may be in any order; without one, they are taken in that order.
+- Groups are named, not given by id, and separated by `;`. An unknown group name fails that row.
+- `invitations` takes the same rows as objects: `{ email, groups?, relation?, accessDays? }`.
+- Each row is a regular `members.invite` with its own checks. A bad row is reported in `results` and does not stop
+  the others.
+
+Cells are split on commas without quoting rules, so names in the `groups` column cannot contain commas.
+
+### Change, suspend and remove
+
+| Endpoint | Input | Who | Does |
+| --- | --- | --- | --- |
+| `members.setRole` | `{ roomId, memberId, relation }` | owners, admins | Replaces the member's direct relation; `null` removes it. Granting or taking away `owner` needs the owner relation. |
+| `members.suspend` | `{ roomId, memberId }` | owners, admins | Takes the member out of their groups and revokes their relation in Better IAM, but keeps them on the roster. Owners cannot be suspended. |
+| `members.resume` | `{ roomId, memberId }` | owners, admins | Puts a suspended member back in the same groups with the same relation. |
+| `members.remove` | `{ roomId, memberId }` | owners, admins | Takes them out of the room in Better IAM (or withdraws a pending invitation) and marks them `removed`, with no groups or relation. |
+
+`setRole` and `suspend` work on `active` members, `resume` on `suspended` ones; anything else is `NOT_FOUND`. A removed
+person can be invited again later.
+
+### Access windows
+
+`accessDays` on an invitation (or the `days` CSV column) gives access an end date. The date is set in several places, so
+access ends even if one of them is missed:
+
+- on the member's Better IAM group memberships and direct relation, which Better IAM stops honouring at that time;
+- on the outsider's invitation, when Better IAM supports access windows for it;
+- on the roster row, as `expiresAt`.
+
+`dr.maintain()` then finds `active` and `invited` members whose `expiresAt` has passed and, for each one, takes them out
+of the room's groups, revokes their relation or withdraws their unaccepted invitation, marks them `expired`, records
+`member.expired` in the activity log, and emits `member.expired`. This matters most for outsiders invited as tenant
+members on Better IAM releases without guests, whose invitations carry no access window of their own. Schedule
+`dr.maintain()` every few minutes ([Maintenance and jobs](/docs/operations/maintenance-and-jobs)).
+
+Group memberships added with `groups.addMembers` can also take an `expiresAt` (epoch milliseconds), which is set on the
+Better IAM membership.
+
+## Permission groups
+
+A **permission group** is a team within one room, such as "Buyers", "Bidder A" or "Advisers". It does two jobs:
+
+- it holds a **relation** on the room in Better IAM, so its members may perform that relation's actions (layer B);
+- it is a **subject** of the permission matrix, so entries for the group apply to all its members (layer A).
+
+Each permission group is a Better IAM group named `{room name} · {group name}`, with a relationship from the group to
+the room. Matrix entries for the group refer to that Better IAM group, so a person's Better IAM group memberships are
+what the matrix sees.
+
+### Create a group
+
+`groups.create` (owners, admins) takes:
+
+<TypeTable
+  type={{
+    roomId: { type: 'string', description: 'The room.', required: true },
+    name: {
+      type: 'string',
+      description: '1 to 120 characters, unique in the room ignoring case (CONFLICT otherwise).',
+      required: true,
+    },
+    description: { type: 'string', description: 'Up to 500 characters.' },
+    kind: {
+      type: "'internal' | 'external' | 'auditor'",
+      description: 'A label for your interface: your own people, an outside party, or auditors. auditor also changes the default relation.',
+      default: "'internal'",
+    },
+    relation: {
+      type: "'viewer' | 'contributor' | 'editor' | 'publisher' | 'auditor'",
+      description: 'The room relation the group holds. Groups cannot be owners or admins: those are granted to people.',
+      default: "'auditor' for kind auditor, otherwise 'viewer'",
+    },
+    preset: {
+      type: 'string',
+      description: 'Grants this preset to the group on the root folder right away. The caller must hold every capability in it.',
+    },
+    expiresAt: {
+      type: 'number',
+      description: 'Epoch milliseconds when the group\'s relation on the room ends in Better IAM.',
+    },
+  }}
+/>
+
+A group without a `preset` holds a relation but no matrix entries: its members can enter the room but see nothing
+until you [set entries](/docs/guides/concepts/permissions#manage-entries) for it.
+
+### Manage groups
+
+| Endpoint | Input | Does |
+| --- | --- | --- |
+| `groups.list` | `{ roomId }` | The room's groups by name, each with `memberCount`. Needs `better-files:members:read`. |
+| `groups.update` | `{ groupId, name?, description?, relation? }` | Renames, describes, or changes the group's relation. |
+| `groups.addMembers` | `{ groupId, identityIds, expiresAt? }` | Adds 1 to 100 people who already have identities, and puts them on the roster as `active`. |
+| `groups.removeMembers` | `{ groupId, identityIds }` | Takes people out of the group; they stay on the roster. |
+| `groups.delete` | `{ groupId }` | Deletes the Better IAM group (with its memberships and relation), the group's matrix entries, and the group from every member's `groupIds`. |
+
+All but `groups.list` need `better-files:members:manage` (owners and admins). To add someone who may not have an
+identity yet, use `members.invite` with `groupIds` instead of `groups.addMembers`.
+
+## Related
+
+- [Permissions](/docs/guides/concepts/permissions): what groups and people can do on each node.
+- [Access model](/docs/guides/better-iam/access-model): relations and policies in Better IAM.
+- [Outsiders](/docs/guides/better-iam/outsiders): guests and keeping outside parties contained.
+- [Templates plugin](/docs/plugins/templates): rooms created with a ready set of groups.
+- [Activity log](/docs/guides/concepts/activity-log): `member.*` and `group.*` records.

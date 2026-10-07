@@ -1,0 +1,995 @@
+[
+  {
+    "name": "better-files",
+    "directory": "packages/better-files",
+    "version": "0.1.0",
+    "description": "Embeddable data rooms for TypeScript apps on Better IAM: rooms, folders, permission matrices, guests, secure viewing and audit, mounted into Next.js, NestJS, Express and more.",
+    "exports": [
+      "better-files",
+      "better-files/adapter-drizzle",
+      "better-files/adapter-libsql",
+      "better-files/adapter-pglite",
+      "better-files/adapter-postgres",
+      "better-files/adapter-prisma",
+      "better-files/adapter-sql",
+      "better-files/adapter-sqlite",
+      "better-files/cli",
+      "better-files/client",
+      "better-files/core",
+      "better-files/core/conformance",
+      "better-files/crypto",
+      "better-files/iam",
+      "better-files/jobs",
+      "better-files/kms",
+      "better-files/mcp",
+      "better-files/middleware",
+      "better-files/middleware/express",
+      "better-files/middleware/hono",
+      "better-files/middleware/fastify",
+      "better-files/middleware/h3",
+      "better-files/middleware/koa",
+      "better-files/middleware/react-router",
+      "better-files/nestjs",
+      "better-files/next",
+      "better-files/plugin-ai",
+      "better-files/plugin-analytics",
+      "better-files/plugin-annotations",
+      "better-files/plugin-audit",
+      "better-files/plugin-connectors",
+      "better-files/plugin-esign",
+      "better-files/plugin-guard",
+      "better-files/plugin-inbound",
+      "better-files/plugin-links",
+      "better-files/plugin-nda",
+      "better-files/plugin-network",
+      "better-files/plugin-notifications",
+      "better-files/plugin-processing",
+      "better-files/plugin-qa",
+      "better-files/plugin-quotas",
+      "better-files/plugin-redaction",
+      "better-files/plugin-retention",
+      "better-files/plugin-reviews",
+      "better-files/plugin-scan",
+      "better-files/plugin-search",
+      "better-files/plugin-sync",
+      "better-files/plugin-tasks",
+      "better-files/plugin-templates",
+      "better-files/plugin-watermark",
+      "better-files/plugin-webhooks",
+      "better-files/react",
+      "better-files/server",
+      "better-files/storage-azure",
+      "better-files/storage-cluster",
+      "better-files/storage-cluster/protocol",
+      "better-files/storage-fs",
+      "better-files/storage-gcs",
+      "better-files/storage-node",
+      "better-files/storage-regional",
+      "better-files/storage-s3",
+      "better-files/svelte",
+      "better-files/svelte/kit",
+      "better-files/testing",
+      "better-files/viewer",
+      "better-files/viewer/server",
+      "better-files/vue"
+    ],
+    "internalDependencies": [
+      "@better-files/adapter-drizzle",
+      "@better-files/adapter-libsql",
+      "@better-files/adapter-pglite",
+      "@better-files/adapter-postgres",
+      "@better-files/adapter-prisma",
+      "@better-files/adapter-sql",
+      "@better-files/adapter-sqlite",
+      "@better-files/cli",
+      "@better-files/client",
+      "@better-files/core",
+      "@better-files/crypto",
+      "@better-files/iam",
+      "@better-files/jobs",
+      "@better-files/kms",
+      "@better-files/mcp",
+      "@better-files/middleware",
+      "@better-files/nestjs",
+      "@better-files/next",
+      "@better-files/plugin-ai",
+      "@better-files/plugin-analytics",
+      "@better-files/plugin-annotations",
+      "@better-files/plugin-audit",
+      "@better-files/plugin-connectors",
+      "@better-files/plugin-esign",
+      "@better-files/plugin-guard",
+      "@better-files/plugin-inbound",
+      "@better-files/plugin-links",
+      "@better-files/plugin-nda",
+      "@better-files/plugin-network",
+      "@better-files/plugin-notifications",
+      "@better-files/plugin-processing",
+      "@better-files/plugin-qa",
+      "@better-files/plugin-quotas",
+      "@better-files/plugin-redaction",
+      "@better-files/plugin-retention",
+      "@better-files/plugin-reviews",
+      "@better-files/plugin-scan",
+      "@better-files/plugin-search",
+      "@better-files/plugin-sync",
+      "@better-files/plugin-tasks",
+      "@better-files/plugin-templates",
+      "@better-files/plugin-watermark",
+      "@better-files/plugin-webhooks",
+      "@better-files/react",
+      "@better-files/server",
+      "@better-files/storage-azure",
+      "@better-files/storage-cluster",
+      "@better-files/storage-fs",
+      "@better-files/storage-gcs",
+      "@better-files/storage-node",
+      "@better-files/storage-regional",
+      "@better-files/storage-s3",
+      "@better-files/svelte",
+      "@better-files/testing",
+      "@better-files/viewer",
+      "@better-files/vue"
+    ],
+    "dependencies": [],
+    "peerDependencies": [
+      "better-iam"
+    ]
+  },
+  {
+    "name": "@better-files/adapter-drizzle",
+    "directory": "packages/adapter-drizzle",
+    "version": "0.1.0",
+    "description": "Drizzle adapter for Better Files: run on the host's drizzle db (node-postgres, postgres.js, PGlite, better-sqlite3, libSQL), with a generated schema for drizzle-kit",
+    "exports": [
+      "@better-files/adapter-drizzle"
+    ],
+    "internalDependencies": [
+      "@better-files/core",
+      "@better-files/adapter-sql"
+    ],
+    "dependencies": [],
+    "peerDependencies": [
+      "@better-files/adapter-sqlite",
+      "@better-files/adapter-postgres",
+      "@better-files/adapter-libsql",
+      "@better-files/adapter-pglite"
+    ]
+  },
+  {
+    "name": "@better-files/adapter-libsql",
+    "directory": "packages/adapter-libsql",
+    "version": "0.1.0",
+    "description": "libSQL / Turso database adapter for Better Files.",
+    "exports": [
+      "@better-files/adapter-libsql"
+    ],
+    "internalDependencies": [
+      "@better-files/core",
+      "@better-files/adapter-sql"
+    ],
+    "dependencies": [
+      "@libsql/client"
+    ],
+    "peerDependencies": []
+  },
+  {
+    "name": "@better-files/adapter-pglite",
+    "directory": "packages/adapter-pglite",
+    "version": "0.1.0",
+    "description": "PGlite (embedded PostgreSQL in WebAssembly) adapter for Better Files: local development, tests, edge and in-browser Postgres",
+    "exports": [
+      "@better-files/adapter-pglite"
+    ],
+    "internalDependencies": [
+      "@better-files/core",
+      "@better-files/adapter-sql"
+    ],
+    "dependencies": [],
+    "peerDependencies": [
+      "@electric-sql/pglite"
+    ]
+  },
+  {
+    "name": "@better-files/adapter-postgres",
+    "directory": "packages/adapter-postgres",
+    "version": "0.1.0",
+    "description": "PostgreSQL database adapter for Better Files, via pg.",
+    "exports": [
+      "@better-files/adapter-postgres"
+    ],
+    "internalDependencies": [
+      "@better-files/core",
+      "@better-files/adapter-sql"
+    ],
+    "dependencies": [
+      "pg"
+    ],
+    "peerDependencies": []
+  },
+  {
+    "name": "@better-files/adapter-prisma",
+    "directory": "packages/adapter-prisma",
+    "version": "0.1.0",
+    "description": "Prisma adapter for Better Files: run on the host's PrismaClient (PostgreSQL or SQLite), with generated models so prisma migrate owns the tables",
+    "exports": [
+      "@better-files/adapter-prisma"
+    ],
+    "internalDependencies": [
+      "@better-files/core",
+      "@better-files/adapter-sql"
+    ],
+    "dependencies": [],
+    "peerDependencies": []
+  },
+  {
+    "name": "@better-files/adapter-sql",
+    "directory": "packages/adapter-sql",
+    "version": "0.1.0",
+    "description": "Shared SQL implementation of the Better Files database adapter: schema migrations, filters and transactions over a small driver interface.",
+    "exports": [
+      "@better-files/adapter-sql"
+    ],
+    "internalDependencies": [
+      "@better-files/core"
+    ],
+    "dependencies": [],
+    "peerDependencies": []
+  },
+  {
+    "name": "@better-files/adapter-sqlite",
+    "directory": "packages/adapter-sqlite",
+    "version": "0.1.0",
+    "description": "SQLite database adapter for Better Files, via better-sqlite3.",
+    "exports": [
+      "@better-files/adapter-sqlite"
+    ],
+    "internalDependencies": [
+      "@better-files/core",
+      "@better-files/adapter-sql"
+    ],
+    "dependencies": [
+      "better-sqlite3"
+    ],
+    "peerDependencies": []
+  },
+  {
+    "name": "@better-files/cli",
+    "directory": "packages/cli",
+    "version": "0.1.0",
+    "description": "The better-files command line: migrate, maintain, verify, doctor, openapi and generate for a host's instance, and sync to mirror a room to a local folder",
+    "exports": [
+      "@better-files/cli"
+    ],
+    "internalDependencies": [
+      "@better-files/core",
+      "@better-files/client",
+      "@better-files/adapter-sql"
+    ],
+    "dependencies": [],
+    "peerDependencies": [
+      "@better-files/server"
+    ]
+  },
+  {
+    "name": "@better-files/client",
+    "directory": "packages/client",
+    "version": "0.1.0",
+    "description": "Browser-safe typed client for Better Files: calls, a parallel resumable uploader, and download links.",
+    "exports": [
+      "@better-files/client"
+    ],
+    "internalDependencies": [],
+    "dependencies": [],
+    "peerDependencies": []
+  },
+  {
+    "name": "@better-files/core",
+    "directory": "packages/core",
+    "version": "0.1.0",
+    "description": "Browser-safe core of Better Files: capabilities, the permission resolver, the schema model, adapter ports and the plugin contract.",
+    "exports": [
+      "@better-files/core",
+      "@better-files/core/conformance"
+    ],
+    "internalDependencies": [],
+    "dependencies": [],
+    "peerDependencies": []
+  },
+  {
+    "name": "@better-files/crypto",
+    "directory": "packages/crypto",
+    "version": "0.1.0",
+    "description": "Streaming authenticated encryption (AES-256-GCM segments), key providers and signed tokens for Better Files.",
+    "exports": [
+      "@better-files/crypto"
+    ],
+    "internalDependencies": [
+      "@better-files/core"
+    ],
+    "dependencies": [],
+    "peerDependencies": []
+  },
+  {
+    "name": "@better-files/iam",
+    "directory": "packages/iam",
+    "version": "0.1.0",
+    "description": "Better IAM integration for Better Files: the IAM plugin (actions and resource types), identity and authorization providers, and the resource resolver.",
+    "exports": [
+      "@better-files/iam"
+    ],
+    "internalDependencies": [
+      "@better-files/core"
+    ],
+    "dependencies": [],
+    "peerDependencies": [
+      "better-iam"
+    ]
+  },
+  {
+    "name": "@better-files/jobs",
+    "directory": "packages/jobs",
+    "version": "0.1.0",
+    "description": "Queue runners for Better Files jobs: BullMQ and pg-boss, with Better Files keeping retries, backoff and recovery in its own jobs table.",
+    "exports": [
+      "@better-files/jobs"
+    ],
+    "internalDependencies": [
+      "@better-files/core",
+      "@better-files/storage-s3"
+    ],
+    "dependencies": [],
+    "peerDependencies": []
+  },
+  {
+    "name": "@better-files/kms",
+    "directory": "packages/kms",
+    "version": "0.1.0",
+    "description": "Bring-your-own-key providers for Better Files: AWS KMS, Google Cloud KMS, Azure Key Vault and HashiCorp Vault Transit over fetch (no SDKs), plus key migration between providers.",
+    "exports": [
+      "@better-files/kms"
+    ],
+    "internalDependencies": [
+      "@better-files/core",
+      "@better-files/crypto",
+      "@better-files/storage-s3"
+    ],
+    "dependencies": [],
+    "peerDependencies": []
+  },
+  {
+    "name": "@better-files/mcp",
+    "directory": "packages/mcp",
+    "version": "0.1.0",
+    "description": "Model Context Protocol tools for Better Files: let AI agents browse, search, read and ask questions of data rooms with the caller's permissions",
+    "exports": [
+      "@better-files/mcp"
+    ],
+    "internalDependencies": [
+      "@better-files/core"
+    ],
+    "dependencies": [],
+    "peerDependencies": [
+      "@better-files/server",
+      "@modelcontextprotocol/sdk"
+    ]
+  },
+  {
+    "name": "@better-files/middleware",
+    "directory": "packages/middleware",
+    "version": "0.1.0",
+    "description": "Framework integrations for Better Files: Express, Hono, Fastify, Koa, React Router, h3 and framework-neutral request helpers.",
+    "exports": [
+      "@better-files/middleware",
+      "@better-files/middleware/express",
+      "@better-files/middleware/hono",
+      "@better-files/middleware/fastify",
+      "@better-files/middleware/h3",
+      "@better-files/middleware/koa",
+      "@better-files/middleware/react-router"
+    ],
+    "internalDependencies": [
+      "@better-files/core"
+    ],
+    "dependencies": [],
+    "peerDependencies": []
+  },
+  {
+    "name": "@better-files/nestjs",
+    "directory": "packages/nestjs",
+    "version": "0.1.0",
+    "description": "NestJS integration for Better Files: a module that serves the protocol, a capability guard and decorators.",
+    "exports": [
+      "@better-files/nestjs"
+    ],
+    "internalDependencies": [
+      "@better-files/core",
+      "@better-files/middleware"
+    ],
+    "dependencies": [],
+    "peerDependencies": [
+      "@nestjs/common",
+      "@nestjs/core",
+      "reflect-metadata",
+      "rxjs"
+    ]
+  },
+  {
+    "name": "@better-files/next",
+    "directory": "packages/next",
+    "version": "0.1.0",
+    "description": "Next.js App Router integration for Better Files: route handlers, server-side calls and page guards.",
+    "exports": [
+      "@better-files/next"
+    ],
+    "internalDependencies": [
+      "@better-files/core",
+      "@better-files/middleware"
+    ],
+    "dependencies": [],
+    "peerDependencies": []
+  },
+  {
+    "name": "@better-files/plugin-ai",
+    "directory": "packages/plugin-ai",
+    "version": "0.1.0",
+    "description": "Permission-aware AI for Better Files: answers and summaries grounded in documents the asker may view, with citations, on Claude.",
+    "exports": [
+      "@better-files/plugin-ai"
+    ],
+    "internalDependencies": [
+      "@better-files/core"
+    ],
+    "dependencies": [],
+    "peerDependencies": [
+      "@anthropic-ai/sdk"
+    ]
+  },
+  {
+    "name": "@better-files/plugin-analytics",
+    "directory": "packages/plugin-analytics",
+    "version": "0.1.0",
+    "description": "Engagement analytics for Better Files: views and downloads by person, team and document, and who has not opened what.",
+    "exports": [
+      "@better-files/plugin-analytics"
+    ],
+    "internalDependencies": [
+      "@better-files/core"
+    ],
+    "dependencies": [],
+    "peerDependencies": []
+  },
+  {
+    "name": "@better-files/plugin-annotations",
+    "directory": "packages/plugin-annotations",
+    "version": "0.1.0",
+    "description": "Annotations for Better Files: page-anchored notes and highlights on documents, private, shared with your group, or room-wide, with replies and resolution",
+    "exports": [
+      "@better-files/plugin-annotations"
+    ],
+    "internalDependencies": [
+      "@better-files/core"
+    ],
+    "dependencies": [],
+    "peerDependencies": []
+  },
+  {
+    "name": "@better-files/plugin-audit",
+    "directory": "packages/plugin-audit",
+    "version": "0.1.0",
+    "description": "Audit reports for Better Files: participants, the access matrix by group and folder, engagement per person and activity-chain integrity, as JSON or a PDF for closing binders and access reviews",
+    "exports": [
+      "@better-files/plugin-audit"
+    ],
+    "internalDependencies": [
+      "@better-files/core"
+    ],
+    "dependencies": [],
+    "peerDependencies": [
+      "pdf-lib"
+    ]
+  },
+  {
+    "name": "@better-files/plugin-connectors",
+    "directory": "packages/plugin-connectors",
+    "version": "0.1.0",
+    "description": "Cloud drive imports for Better Files: Google Drive, Dropbox, OneDrive/SharePoint and Box into a room, with folder structure, re-import of changes and progress",
+    "exports": [
+      "@better-files/plugin-connectors"
+    ],
+    "internalDependencies": [
+      "@better-files/core"
+    ],
+    "dependencies": [],
+    "peerDependencies": []
+  },
+  {
+    "name": "@better-files/plugin-esign",
+    "directory": "packages/plugin-esign",
+    "version": "0.1.0",
+    "description": "Native e-signature for Better Files: envelopes, sequential or parallel signing links, an evidence chain and a certificate of completion.",
+    "exports": [
+      "@better-files/plugin-esign"
+    ],
+    "internalDependencies": [
+      "@better-files/core"
+    ],
+    "dependencies": [
+      "pdf-lib"
+    ],
+    "peerDependencies": []
+  },
+  {
+    "name": "@better-files/plugin-guard",
+    "directory": "packages/plugin-guard",
+    "version": "0.1.0",
+    "description": "Download rate limits and anomaly reporting for Better Files, wired to Better IAM threat detection and response.",
+    "exports": [
+      "@better-files/plugin-guard"
+    ],
+    "internalDependencies": [
+      "@better-files/core"
+    ],
+    "dependencies": [],
+    "peerDependencies": []
+  },
+  {
+    "name": "@better-files/plugin-inbound",
+    "directory": "packages/plugin-inbound",
+    "version": "0.1.0",
+    "description": "Email to a data room for Better Files: per-folder drop addresses whose attachments become documents, with sender allow-lists, expiry and provider authentication (Postmark adapter included)",
+    "exports": [
+      "@better-files/plugin-inbound"
+    ],
+    "internalDependencies": [
+      "@better-files/core"
+    ],
+    "dependencies": [],
+    "peerDependencies": []
+  },
+  {
+    "name": "@better-files/plugin-links",
+    "directory": "packages/plugin-links",
+    "version": "0.1.0",
+    "description": "Dropbox-style share links for Better Files: passwords, email capture, expiry, use caps and full activity logging.",
+    "exports": [
+      "@better-files/plugin-links"
+    ],
+    "internalDependencies": [
+      "@better-files/core"
+    ],
+    "dependencies": [],
+    "peerDependencies": []
+  },
+  {
+    "name": "@better-files/plugin-nda",
+    "directory": "packages/plugin-nda",
+    "version": "0.1.0",
+    "description": "Per-room NDA gating for Better Files: versioned agreements, hash-bound acceptances, and content withheld until accepted.",
+    "exports": [
+      "@better-files/plugin-nda"
+    ],
+    "internalDependencies": [
+      "@better-files/core"
+    ],
+    "dependencies": [],
+    "peerDependencies": []
+  },
+  {
+    "name": "@better-files/plugin-network",
+    "directory": "packages/plugin-network",
+    "version": "0.1.0",
+    "description": "Network rules for Better Files: per-room IP allow-lists for guests or everyone, enforced on every operation and download.",
+    "exports": [
+      "@better-files/plugin-network"
+    ],
+    "internalDependencies": [
+      "@better-files/core"
+    ],
+    "dependencies": [],
+    "peerDependencies": []
+  },
+  {
+    "name": "@better-files/plugin-notifications",
+    "directory": "packages/plugin-notifications",
+    "version": "0.1.0",
+    "description": "Email notifications and daily digests for Better Files, with per-room preferences.",
+    "exports": [
+      "@better-files/plugin-notifications"
+    ],
+    "internalDependencies": [
+      "@better-files/core"
+    ],
+    "dependencies": [],
+    "peerDependencies": []
+  },
+  {
+    "name": "@better-files/plugin-processing",
+    "directory": "packages/plugin-processing",
+    "version": "0.1.0",
+    "description": "Document processing for Better Files: Office to PDF (LibreOffice or your converter) so every format can be viewed and watermarked, plus thumbnails",
+    "exports": [
+      "@better-files/plugin-processing"
+    ],
+    "internalDependencies": [
+      "@better-files/core"
+    ],
+    "dependencies": [],
+    "peerDependencies": [
+      "unpdf",
+      "@napi-rs/canvas"
+    ]
+  },
+  {
+    "name": "@better-files/plugin-qa",
+    "directory": "packages/plugin-qa",
+    "version": "0.1.0",
+    "description": "Due-diligence Q&A for Better Files: ask, assign, answer, approve and publish, with team-scoped visibility.",
+    "exports": [
+      "@better-files/plugin-qa"
+    ],
+    "internalDependencies": [
+      "@better-files/core"
+    ],
+    "dependencies": [],
+    "peerDependencies": []
+  },
+  {
+    "name": "@better-files/plugin-quotas",
+    "directory": "packages/plugin-quotas",
+    "version": "0.1.0",
+    "description": "Storage quotas for Better Files: byte, document and file-size limits per room and per tenant (from your plan), enforced before upload, with usage and warnings",
+    "exports": [
+      "@better-files/plugin-quotas"
+    ],
+    "internalDependencies": [
+      "@better-files/core"
+    ],
+    "dependencies": [],
+    "peerDependencies": []
+  },
+  {
+    "name": "@better-files/plugin-redaction",
+    "directory": "packages/plugin-redaction",
+    "version": "0.1.0",
+    "description": "Redaction for Better Files: find sensitive text (emails, phone numbers, IDs, your patterns) and burn it out of PDFs and images as a new version or a redacted copy",
+    "exports": [
+      "@better-files/plugin-redaction"
+    ],
+    "internalDependencies": [
+      "@better-files/core"
+    ],
+    "dependencies": [],
+    "peerDependencies": [
+      "pdf-lib",
+      "unpdf",
+      "@napi-rs/canvas"
+    ]
+  },
+  {
+    "name": "@better-files/plugin-retention",
+    "directory": "packages/plugin-retention",
+    "version": "0.1.0",
+    "description": "Legal holds for Better Files: preserve rooms or folders against deletion, trash purges and room deletion.",
+    "exports": [
+      "@better-files/plugin-retention"
+    ],
+    "internalDependencies": [
+      "@better-files/core"
+    ],
+    "dependencies": [],
+    "peerDependencies": []
+  },
+  {
+    "name": "@better-files/plugin-reviews",
+    "directory": "packages/plugin-reviews",
+    "version": "0.1.0",
+    "description": "Access reviews for Better Files: periodic room access certifications with per-person keep or revoke decisions, recommendations from activity, self-review prevention, scheduled campaigns and revocation on completion",
+    "exports": [
+      "@better-files/plugin-reviews"
+    ],
+    "internalDependencies": [
+      "@better-files/core"
+    ],
+    "dependencies": [],
+    "peerDependencies": []
+  },
+  {
+    "name": "@better-files/plugin-scan",
+    "directory": "packages/plugin-scan",
+    "version": "0.1.0",
+    "description": "Virus scanning for Better Files uploads: a ClamAV (clamd INSTREAM) client and quarantine until clean.",
+    "exports": [
+      "@better-files/plugin-scan"
+    ],
+    "internalDependencies": [
+      "@better-files/core"
+    ],
+    "dependencies": [],
+    "peerDependencies": []
+  },
+  {
+    "name": "@better-files/plugin-search",
+    "directory": "packages/plugin-search",
+    "version": "0.1.0",
+    "description": "Search for Better Files: names and (opt-in) document text, filtered by the caller's permissions.",
+    "exports": [
+      "@better-files/plugin-search"
+    ],
+    "internalDependencies": [
+      "@better-files/core"
+    ],
+    "dependencies": [],
+    "peerDependencies": [
+      "unpdf"
+    ]
+  },
+  {
+    "name": "@better-files/plugin-sync",
+    "directory": "packages/plugin-sync",
+    "version": "0.1.0",
+    "description": "Delta sync for Better Files: snapshots and a permission-aware changes feed with content hashes, for desktop and CLI mirrors",
+    "exports": [
+      "@better-files/plugin-sync"
+    ],
+    "internalDependencies": [
+      "@better-files/core"
+    ],
+    "dependencies": [],
+    "peerDependencies": []
+  },
+  {
+    "name": "@better-files/plugin-tasks",
+    "directory": "packages/plugin-tasks",
+    "version": "0.1.0",
+    "description": "Checklists and tasks for Better Files: assignees, due dates, linked documents and overdue events.",
+    "exports": [
+      "@better-files/plugin-tasks"
+    ],
+    "internalDependencies": [
+      "@better-files/core"
+    ],
+    "dependencies": [],
+    "peerDependencies": []
+  },
+  {
+    "name": "@better-files/plugin-templates",
+    "directory": "packages/plugin-templates",
+    "version": "0.1.0",
+    "description": "Room templates for Better Files: folder skeletons, groups, settings and checklists, built-in and per tenant.",
+    "exports": [
+      "@better-files/plugin-templates"
+    ],
+    "internalDependencies": [
+      "@better-files/core"
+    ],
+    "dependencies": [],
+    "peerDependencies": []
+  },
+  {
+    "name": "@better-files/plugin-watermark",
+    "directory": "packages/plugin-watermark",
+    "version": "0.1.0",
+    "description": "Watermarked downloads and views for Better Files: identity, time and a forensic code stamped on PDFs and images.",
+    "exports": [
+      "@better-files/plugin-watermark"
+    ],
+    "internalDependencies": [
+      "@better-files/core"
+    ],
+    "dependencies": [
+      "pdf-lib"
+    ],
+    "peerDependencies": [
+      "sharp"
+    ]
+  },
+  {
+    "name": "@better-files/plugin-webhooks",
+    "directory": "packages/plugin-webhooks",
+    "version": "0.1.0",
+    "description": "Signed, retried webhooks for Better Files events, with SSRF protection.",
+    "exports": [
+      "@better-files/plugin-webhooks"
+    ],
+    "internalDependencies": [
+      "@better-files/core"
+    ],
+    "dependencies": [],
+    "peerDependencies": []
+  },
+  {
+    "name": "@better-files/react",
+    "directory": "packages/react",
+    "version": "0.1.0",
+    "description": "React bindings for Better Files: a provider, typed query hooks, an uploader hook and a capability gate.",
+    "exports": [
+      "@better-files/react"
+    ],
+    "internalDependencies": [
+      "@better-files/client"
+    ],
+    "dependencies": [],
+    "peerDependencies": [
+      "react"
+    ]
+  },
+  {
+    "name": "@better-files/server",
+    "directory": "packages/server",
+    "version": "0.1.0",
+    "description": "The Better Files engine: the betterFiles() factory, the two-layer access engine, plugin host and HTTP protocol.",
+    "exports": [
+      "@better-files/server"
+    ],
+    "internalDependencies": [
+      "@better-files/core",
+      "@better-files/crypto"
+    ],
+    "dependencies": [],
+    "peerDependencies": []
+  },
+  {
+    "name": "@better-files/storage-azure",
+    "directory": "packages/storage-azure",
+    "version": "0.1.0",
+    "description": "Azure Blob Storage adapter for Better Files over fetch, with Shared Key, SAS and Entra ID auth; no Azure SDK.",
+    "exports": [
+      "@better-files/storage-azure"
+    ],
+    "internalDependencies": [
+      "@better-files/core"
+    ],
+    "dependencies": [],
+    "peerDependencies": []
+  },
+  {
+    "name": "@better-files/storage-cluster",
+    "directory": "packages/storage-cluster",
+    "version": "0.1.0",
+    "description": "A storage control plane for Better Files: servers with local disks join as storage nodes; placement, replication, failover reads, drain and repair, exposed as a StorageAdapter",
+    "exports": [
+      "@better-files/storage-cluster",
+      "@better-files/storage-cluster/protocol"
+    ],
+    "internalDependencies": [
+      "@better-files/core"
+    ],
+    "dependencies": [],
+    "peerDependencies": []
+  },
+  {
+    "name": "@better-files/storage-fs",
+    "directory": "packages/storage-fs",
+    "version": "0.1.0",
+    "description": "Local-disk storage adapter for Better Files, with multipart uploads.",
+    "exports": [
+      "@better-files/storage-fs"
+    ],
+    "internalDependencies": [
+      "@better-files/core"
+    ],
+    "dependencies": [],
+    "peerDependencies": []
+  },
+  {
+    "name": "@better-files/storage-gcs",
+    "directory": "packages/storage-gcs",
+    "version": "0.1.0",
+    "description": "Google Cloud Storage adapter for Better Files over the JSON API and fetch, with service-account tokens and V4 signed URLs; no Google SDK.",
+    "exports": [
+      "@better-files/storage-gcs"
+    ],
+    "internalDependencies": [
+      "@better-files/core"
+    ],
+    "dependencies": [],
+    "peerDependencies": []
+  },
+  {
+    "name": "@better-files/storage-node",
+    "directory": "packages/storage-node",
+    "version": "0.1.0",
+    "description": "The storage node agent for Better Files clusters: serves encrypted objects from a local disk, joins and heartbeats to the control plane (outbound), and runs its commands",
+    "exports": [
+      "@better-files/storage-node"
+    ],
+    "internalDependencies": [
+      "@better-files/storage-cluster"
+    ],
+    "dependencies": [],
+    "peerDependencies": []
+  },
+  {
+    "name": "@better-files/storage-regional",
+    "directory": "packages/storage-regional",
+    "version": "0.1.0",
+    "description": "Data residency for Better Files: routes each room's files to the storage adapter of its region.",
+    "exports": [
+      "@better-files/storage-regional"
+    ],
+    "internalDependencies": [
+      "@better-files/core"
+    ],
+    "dependencies": [],
+    "peerDependencies": []
+  },
+  {
+    "name": "@better-files/storage-s3",
+    "directory": "packages/storage-s3",
+    "version": "0.1.0",
+    "description": "S3-compatible storage adapter for Better Files (AWS S3, Cloudflare R2, MinIO, B2, Wasabi) using SigV4 over fetch, no AWS SDK.",
+    "exports": [
+      "@better-files/storage-s3"
+    ],
+    "internalDependencies": [
+      "@better-files/core"
+    ],
+    "dependencies": [],
+    "peerDependencies": []
+  },
+  {
+    "name": "@better-files/svelte",
+    "directory": "packages/svelte",
+    "version": "0.1.0",
+    "description": "Svelte bindings for Better Files: typed stores for rooms, folders, capabilities and uploads (Svelte 4 and 5, no runtime dependency), plus SvelteKit hooks",
+    "exports": [
+      "@better-files/svelte",
+      "@better-files/svelte/kit"
+    ],
+    "internalDependencies": [
+      "@better-files/client"
+    ],
+    "dependencies": [],
+    "peerDependencies": []
+  },
+  {
+    "name": "@better-files/testing",
+    "directory": "packages/testing",
+    "version": "0.1.0",
+    "description": "In-memory database and storage adapters and a fake identity integration for testing Better Files.",
+    "exports": [
+      "@better-files/testing"
+    ],
+    "internalDependencies": [
+      "@better-files/core"
+    ],
+    "dependencies": [],
+    "peerDependencies": []
+  },
+  {
+    "name": "@better-files/viewer",
+    "directory": "packages/viewer",
+    "version": "0.1.0",
+    "description": "Secure document viewer for Better Files: server-rendered, watermarked page images and the <bf-viewer> custom element",
+    "exports": [
+      "@better-files/viewer",
+      "@better-files/viewer/server"
+    ],
+    "internalDependencies": [
+      "@better-files/core",
+      "@better-files/client"
+    ],
+    "dependencies": [],
+    "peerDependencies": [
+      "unpdf",
+      "@napi-rs/canvas"
+    ]
+  },
+  {
+    "name": "@better-files/vue",
+    "directory": "packages/vue",
+    "version": "0.1.0",
+    "description": "Vue bindings for Better Files: a plugin and typed composables for rooms, folders, capabilities and uploads",
+    "exports": [
+      "@better-files/vue"
+    ],
+    "internalDependencies": [
+      "@better-files/client"
+    ],
+    "dependencies": [],
+    "peerDependencies": [
+      "vue"
+    ]
+  }
+]

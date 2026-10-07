@@ -1,0 +1,77 @@
+---
+title: Keys and audit
+description: Files encrypted with a Better IAM KMS key per room, crypto-shredding on room deletion, and security events in Better IAM's audit chain.
+icon: LockKeyhole
+packages: ['@better-files/iam', '@better-files/crypto']
+sources:
+  - packages/iam/src/index.ts
+  - packages/server/src/files.ts
+  - packages/server/src/engine.ts
+  - packages/server/src/index.ts
+---
+
+Better IAM includes a key management service (KMS): it holds encryption keys that never leave it, and encrypts or
+decrypts small pieces of data with them on request. Better Files uses it for **envelope encryption**. Each stored file
+gets a fresh random data key, the file is encrypted with that data key, and the data key is stored only in wrapped
+(encrypted) form, wrapped by a KMS key. Reading the file means asking the KMS to unwrap its data key, which Better IAM
+authorizes and records like any other action.
+
+## A key per room
+
+With a [system credential](/docs/guides/better-iam/service-account) set, `betterIamIntegration` provides the key
+provider, and by default creates **one KMS key per room** when the room is created:
+
+| `keys` option | Effect |
+| --- | --- |
+| omitted, or `{ perRoom: true }` | A KMS key per room, tagged with the room id |
+| `{ perRoom: false }` | One key per tenant, with the alias `alias/better-files` |
+| `false` | No KMS keys from the integration; configure `encryption: { keys }` yourself |
+
+The encryption context, extra data bound to each wrapped key, ties a data key to the file it belongs to, so a wrapped
+key copied onto another file does not decrypt.
+
+### Deleting a room destroys its key
+
+When a room is deleted, the integration schedules its KMS key for deletion, with a 7-day waiting period. Once the key
+is gone, every data key it wrapped is unreadable, and so is every copy of the room's files, including copies in
+backups. This is called **crypto-shredding**. With one key per tenant there is no per-room key to destroy, so room
+deletion removes the stored files but cannot shred backups.
+
+<Callout type="error" title="Known issue with one key per tenant">
+  With `keys: { perRoom: false }`, deleting a room can schedule the **shared tenant key** for deletion in the process
+  that created it, which would make every room in the tenant unreadable once the waiting period ends. Keep the
+  default, a key per room, until this is fixed.
+</Callout>
+
+### Other key providers
+
+The integration's KMS is the default, not the only option. `encryption: { keys }` takes any key provider: the BYOK
+providers for AWS KMS, Google Cloud KMS, Azure Key Vault and Vault Transit, or `localKeyProvider({ secret })` for
+development. See [encryption](/docs/operations/encryption).
+
+## The audit chain
+
+Better IAM keeps a tamper-evident audit chain per tenant. Better Files records its **security events** there: the
+events an auditor of the identity system needs, such as permission changes, original downloads, invitations,
+removals and role changes, each with the actor, the resource and the outcome. For example:
+
+| Action | Recorded when |
+| --- | --- |
+| `better-files:room.created` | A room is created |
+| `better-files:permissions.changed` | Permission entries change |
+| `better-files:documents:download-original` | Someone downloads an original |
+| `better-files:member.invited`, `member.removed`, `member.role-changed`, `member.suspended` | Room membership changes |
+
+Events are recorded once the operation commits, so a failed operation leaves no false record. Turn them off with
+`audit: false`. They also need Better IAM's audit API, which `betterIamFeatures(iam).audit` reports.
+
+Everything else, every view, download, upload and move, goes to the room's own
+[activity log](/docs/guides/concepts/activity-log), which is hash-chained too and far more detailed. The two logs
+answer different questions: the audit chain says who changed access, and the activity log says who did what with the
+content.
+
+## Related
+
+- [Encryption](/docs/operations/encryption): the file format and every key provider.
+- [Activity log](/docs/guides/concepts/activity-log)
+- [Service account](/docs/guides/better-iam/service-account): the credential the KMS calls use.

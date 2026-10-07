@@ -1,0 +1,11 @@
+{
+  "version": "0.1.0",
+  "packages": 57,
+  "plugins": 25,
+  "subpaths": 67,
+  "operations": 52,
+  "actions": 57,
+  "errorCodes": 16,
+  "capabilities": 10,
+  "relations": 7
+}

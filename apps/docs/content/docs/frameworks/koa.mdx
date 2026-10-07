@@ -1,0 +1,53 @@
+---
+title: Koa
+metaTitle: Better Files for Koa
+description: A Koa middleware that streams the protocol through Node's response, puts the bound API on ctx.state, and guards @koa/router routes.
+packages:
+  - '@better-files/middleware'
+sources:
+  - packages/middleware/src/koa.ts
+  - packages/middleware/src/index.ts
+  - docs/guides/frameworks/koa.md
+---
+
+`better-files/middleware/koa` works with Koa 2 and 3, and reads route params from `@koa/router`.
+
+```ts title="server.ts"
+import Koa from 'koa';
+import Router from '@koa/router';
+import { createBetterFilesKoa } from 'better-files/middleware/koa';
+import { dr } from './better-files';
+
+const files = createBetterFilesKoa(dr);
+const app = new Koa();
+const router = new Router();
+
+app.use(files.errorHandler); // first: renders Better Files errors thrown downstream
+app.use(files.middleware); // the protocol under /api/better-files; ctx.state.betterFiles elsewhere
+
+router.get(
+  '/deals/:roomId/documents/:nodeId',
+  files.requireCapability(['VIEW'], { tenantId: (ctx) => ctx.state.tenantId as string }),
+  async (ctx) => {
+    ctx.body = await ctx.state.betterFiles.api.documents.get({
+      tenantId: ctx.state.tenantId,
+      nodeId: ctx.params.nodeId,
+    });
+  },
+);
+
+app.use(router.routes());
+app.listen(3000);
+```
+
+| Piece                                      | What it does                                                                                                                                                         |
+| ------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `middleware`                               | Streams protocol requests straight through Node's request and response, bypassing Koa's response handling (`ctx.respond = false`). Other requests get `ctx.state.betterFiles`. |
+| `requireCapability(capabilities, select?)` | Checks one node, reading `tenantId`, `roomId` and `nodeId` from `ctx.params` unless you pass selectors. A refusal sets the status and the JSON error body.          |
+| `errorHandler`                             | Turns Better Files and Better IAM errors into the protocol's error envelope. Rethrows anything that would be a 500.                                                 |
+| `helpers(ctx)`                             | Builds `{ credential, api, capabilities }` for any context.                                                                                                         |
+| `basePath`                                 | The instance's base path.                                                                                                                                            |
+
+A body that `koa-bodyparser` or `@koa/bodyparser` already parsed is handed to Better Files, so the order of body
+parsers does not matter. `ctx.state.betterFiles` holds `credential`, `api` and
+`capabilities({ tenantId, roomId, nodeIds })`.

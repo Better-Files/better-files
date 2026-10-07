@@ -1,0 +1,26 @@
+{
+  "title": "Frameworks",
+  "description": "Next.js, NestJS, Express, Hono, Fastify, SvelteKit, Nuxt, React, Vue, and more",
+  "root": true,
+  "icon": "Layers",
+  "pages": [
+    "index",
+    "---Client---",
+    "client",
+    "react",
+    "vue",
+    "svelte",
+    "---Full-stack---",
+    "nextjs",
+    "nuxt",
+    "sveltekit",
+    "react-router",
+    "---Server---",
+    "nestjs",
+    "express",
+    "fastify",
+    "hono",
+    "koa",
+    "fetch"
+  ]
+}

@@ -1,0 +1,235 @@
+---
+title: PostgreSQL
+description: Store the Better Files tables in PostgreSQL through node-postgres, share the app's pool, and range-partition the activity log.
+metaTitle: PostgreSQL adapter and partitioning
+icon: Database
+packages: ['@better-files/adapter-postgres', '@better-files/adapter-sql']
+sources:
+  - packages/adapter-postgres/src/index.ts
+  - packages/adapter-postgres/README.md
+  - packages/adapter-sql/src/index.ts
+  - packages/adapter-sql/src/partitions.ts
+  - packages/adapter-sql/src/generate.ts
+  - packages/core/src/ports.ts
+  - packages/cli/src/cli.ts
+  - tests/conformance/postgres-partitions.test.ts
+  - tests/conformance/sql-databases.test.ts
+---
+
+PostgreSQL is the database most production deployments use. The adapter runs the Better Files tables through
+[node-postgres](https://node-postgres.com) (`pg`), and can share the pool your application, and Better IAM, already
+use, so there is one set of connections and one database to back up.
+
+```ts
+import pg from 'pg';
+import { betterFiles } from 'better-files';
+import { postgresAdapter } from 'better-files/adapter-postgres';
+
+const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL });
+
+export const dr = betterFiles({
+  database: postgresAdapter({ pool }), // or postgresAdapter({ connectionString })
+  // iam, storage, secret, plugins
+});
+
+await dr.initialize();
+```
+
+## Options
+
+<TypeTable
+  type={{
+    pool: {
+      type: 'pg.Pool',
+      description: 'An existing pool, shared with the rest of the app. dr.close() leaves it open.',
+    },
+    connectionString: {
+      type: 'string',
+      description: 'Used when no pool is given: the adapter creates its own pool, and dr.close() ends it.',
+    },
+    poolSize: {
+      type: 'number',
+      description: 'The max size of a pool the adapter creates. Ignored when you pass a pool.',
+      default: '10',
+    },
+    partitions: {
+      type: 'PartitionOptions',
+      description: 'Range-partitioned tables by model name, such as { activity: { interval: "month" } }. See Partitioned tables.',
+    },
+  }}
+/>
+
+`postgresAdapter` throws when it gets neither `pool` nor `connectionString`.
+
+## Share the pool
+
+Pass the pool your application already has. Each Better Files transaction checks out one connection with
+`pool.connect()`, runs `BEGIN`, the work, and `COMMIT` (or `ROLLBACK` when it throws), then releases the connection.
+Reads outside a transaction go straight to the pool. Size the pool for both the app and Better Files.
+
+`postgresDriver(pool)` returns the raw `SqlDriver` over a pool, for composing with
+[`createSqlAdapter`](/docs/operations/databases#the-shared-sql-layer) yourself. The [Drizzle
+adapter](/docs/operations/databases/prisma-and-drizzle) uses it for node-postgres.
+
+Tables are created in the connection's current schema, the first schema on its `search_path`.
+
+## Placeholders with explicit casts
+
+Every parameter placeholder carries a cast: `$1::text`, `$2::double precision`, `$3::jsonb`, `$4::boolean`, and
+`$5::bigint` for `LIMIT` and `OFFSET`. node-postgres sends parameters untyped and lets PostgreSQL infer them; some
+clients (Prisma, some serverless drivers) send typed parameters instead. The casts make both behave the same, which
+is why the same SQL runs through `pg`, PGlite, postgres.js and Prisma.
+
+Other details of the PostgreSQL path:
+
+- Numbers and timestamps are `DOUBLE PRECISION` (timestamps in epoch milliseconds), JSON fields `JSONB`.
+- A unique violation (SQLSTATE `23505`) is reported as `CONFLICT`.
+- `increment` runs `UPDATE … RETURNING`, which takes the row lock. Concurrent transactions wait for it and then see the
+  new value, so activity sequence and version numbers stay gap-free under `READ COMMITTED`.
+
+## Partitioned tables
+
+The activity log only grows. Range-partition it by month so queries on recent activity read small partitions, and
+old months can be detached and archived:
+
+```ts
+import { partitionsPlugin, postgresAdapter } from 'better-files/adapter-postgres';
+
+const database = postgresAdapter({
+  pool,
+  partitions: { activity: { interval: 'month', premake: 3 } },
+});
+
+export const dr = betterFiles({
+  database,
+  plugins: [partitionsPlugin(database), ...plugins],
+  // iam, storage, secret
+});
+```
+
+- `dr.initialize()` creates the table as `PARTITION BY RANGE (created_at)` with a default partition, plus the current
+  interval and `premake` intervals ahead of it.
+- `dr.maintain()`, through `partitionsPlugin`, creates the next ranges before they are needed. Rows that landed in the
+  default partition meanwhile get a range of their own and move into it.
+- `retain: 12` keeps 12 intervals, the current one included. Older partitions are detached as ordinary tables, ready
+  to dump and archive, or dropped with `expire: 'drop'`.
+
+Partitioning is PostgreSQL only. It works the same on [PGlite](/docs/operations/databases/pglite); any other adapter
+given `partitions` fails with `INVALID_CONFIG`.
+
+### Partition options
+
+`partitions` maps a model name (`activity`, or a plugin's table) to a `PartitionSpec`:
+
+<TypeTable
+  type={{
+    interval: {
+      type: "'day' | 'week' | 'month' | 'year'",
+      description: 'Partition length, in UTC. Weeks start on Monday.',
+      required: true,
+    },
+    field: {
+      type: 'string',
+      description: 'The field rows are partitioned by. It must be a required timestamp or number field.',
+      default: "'createdAt'",
+    },
+    premake: {
+      type: 'number',
+      description: 'Partitions kept ready ahead of the current one, so writes never land in the default partition. A whole number, 0 or more.',
+      default: '3',
+    },
+    retain: {
+      type: 'number',
+      description: 'Partitions to keep, the current one included; older ones expire on maintain(). A whole number, 1 or more.',
+      default: 'keep everything',
+    },
+    expire: {
+      type: "'detach' | 'drop'",
+      description: 'detach leaves an expired partition as a standalone table to archive; drop deletes it.',
+      default: "'detach'",
+    },
+    relaxUnique: {
+      type: 'boolean',
+      description: 'Accept that unique indexes on the table also include the partition field. Required for tables with other unique indexes.',
+      default: 'false (true for the core activity table)',
+    },
+  }}
+/>
+
+Partitions are named after the table and the start of their range: `better_files_activity_p202610` for a month,
+`_p20261005` for a day or a week, `_p2026` for a year. The default partition is `better_files_activity_default`.
+
+### Unique indexes
+
+PostgreSQL requires every unique index on a partitioned table to include the partition column. Partitioning adds it,
+so a unique index on other columns stops being enforced on its own. A table with such an index (the `outbox` table,
+for example) is refused with `INVALID_CONFIG` unless you set `relaxUnique: true` and accept the weaker guarantee.
+The core `activity` table does not need it: each room's sequence comes from a locked counter.
+
+The primary key becomes `(id, created_at)`, or `id` plus whichever `field` you chose.
+
+### Retention and the hash chain
+
+The activity log is hash-chained. Once `retain` expires a partition, `activity.verify` reports breaks at the oldest
+partition kept. Archive a detached partition before you drop it.
+
+A detached partition keeps its name as an archive table, and `maintain()` never reuses that name for a new range.
+
+### Convert an existing table
+
+`dr.initialize()` changes the table only when it can do so safely:
+
+- a missing table is created partitioned;
+- an existing table with no rows is dropped and created partitioned (partitioning added after the first migration);
+- an existing table with rows is left as it is.
+
+Convert a table with rows once, in a maintenance window:
+
+```ts
+await database.partitions!.convert('activity'); // false when it is already partitioned
+```
+
+`convert` renames the old table, creates the partitioned one, copies every row, drops the old table and creates the
+ranges, all in one transaction. It locks the table for the copy.
+
+### Status and manual upkeep
+
+`database.partitions` is there when the adapter was created with `partitions`:
+
+| Method | What it does |
+| --- | --- |
+| `maintain(now?)` | Creates the ranges `premake` asks for, moves rows out of the default partition into ranges of their own, and expires partitions beyond `retain`. Idempotent. Returns `{ created, moved, detached, dropped }`. |
+| `status()` | For each configured table: `model`, `tableName`, `partitioned`, its `partitions` (each with `name`, `from`, `to` in epoch milliseconds, and `default`), and `defaultRows`, the rows in the default partition. |
+| `convert(model, now?)` | Rebuilds an unpartitioned table as a partitioned one (above). |
+
+`partitionsPlugin(database)` calls `maintain()` from `dr.maintain()` and logs
+`better-files: partitions maintained` at `info` when it changed anything. Without it, call `maintain()` yourself at
+least daily. `partitionsPlugin` refuses to start with an adapter that has no `partitions` option.
+
+A watch on `defaultRows` tells you when maintenance has fallen behind: until it runs, new rows past the last range
+land in the default partition.
+
+### Generated DDL
+
+If your migration tool creates the tables, generate the partitioned DDL with the same option:
+
+```ts
+import { generateSchema } from 'better-files/adapter-sql';
+
+const sql = generateSchema(dr.schema, {
+  format: 'sql',
+  dialect: 'postgres',
+  partitions: { activity: { interval: 'month' } },
+});
+```
+
+The `better-files generate` command does not take partition options, so call `generateSchema` from a script for
+partitioned tables. The generated DDL creates the partitioned table, its default partition and its indexes; the
+adapter's `partitions.maintain()` (or `partitionsPlugin`) then adds the ranges.
+
+## Related
+
+- [Databases](/docs/operations/databases): choosing an adapter and the shared SQL layer.
+- [PGlite](/docs/operations/databases/pglite): the same PostgreSQL path with no server.
+- [Maintenance and jobs](/docs/operations/maintenance-and-jobs)
+- [Activity log](/docs/guides/concepts/activity-log)

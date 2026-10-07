@@ -1,0 +1,308 @@
+---
+title: Search
+description: Search a room by name and, when enabled, by document text, with every result checked against the caller's permissions.
+metaTitle: Permission-aware search for data rooms
+icon: Radar
+packages: ['@better-files/plugin-search']
+sources:
+  - packages/plugin-search/src/index.ts
+  - packages/plugin-search/src/backend.ts
+  - packages/plugin-search/src/meilisearch.ts
+  - packages/plugin-search/README.md
+  - packages/plugin-search/package.json
+  - packages/core/src/operations.ts
+  - packages/server/src/access.ts
+  - packages/server/src/pipeline.ts
+  - tests/plugins/search.test.ts
+  - tests/plugins/search-meilisearch.test.ts
+  - tests/plugins/ai-adversarial.test.ts
+---
+
+A deal room soon holds thousands of files, and people look for "the lease" or "EBITDA" rather than browsing folders.
+Search in a data room has one hard rule: it must never reveal a file name or a sentence the person could not open
+themselves, not even as a hit count.
+
+The search plugin keeps an index of folder and document names and, if you turn it on, the text inside documents. The
+index only proposes candidates. Every candidate is then checked against Better Files' own tables and the caller's
+permissions before it is returned.
+
+```ts
+import { betterFiles } from 'better-files';
+import { betterFilesIamPlugin } from 'better-files/iam';
+import { searchPlugin } from 'better-files/plugin-search';
+
+const plugins = [searchPlugin({ indexContent: true })] as const;
+const iamPlugin = betterFilesIamPlugin({ plugins }); // registers better-files:search:reindex
+
+export const dr = betterFiles({ /* iam, database, storage, secret */ plugins });
+
+const results = await dr.api.search.query(credential, { tenantId, roomId, q: 'deferred revenue' });
+// [{ nodeId, kind, name, parentId, score, snippet? }]
+```
+
+By default the index is a table, `searchEntries`, in your own database. On a SQL database, run
+`better-files generate` and `better-files migrate` after adding the plugin.
+
+## Options
+
+<TypeTable
+  type={{
+    backend: {
+      type: 'SearchBackend',
+      description: 'Where the index lives: sqlSearchBackend() (a table in your database) or meilisearchBackend({ ... }).',
+      default: 'sqlSearchBackend()',
+    },
+    indexContent: {
+      type: 'boolean',
+      description: 'Index document text as well as names. The extracted text is stored in plain text by the backend.',
+      default: 'false',
+    },
+    extractors: {
+      type: 'readonly Extractor[]',
+      description: 'Turn file bytes into text. The first extractor that accepts a file is used.',
+      default: '[plainTextExtractor, pdfExtractor]',
+    },
+    maxTextLength: {
+      type: 'number',
+      description: 'Characters of text kept per document.',
+      default: '200000',
+    },
+    maxFileBytes: {
+      type: 'number',
+      description: 'Files larger than this are indexed by name only.',
+      default: '50 MiB',
+    },
+    candidateLimit: {
+      type: 'number',
+      description: 'Candidates fetched from the backend per query, before permission filtering.',
+      default: '1000',
+    },
+  }}
+/>
+
+<Callout type="warn" title="Extracted text is stored in plain text">
+  Files stay encrypted in storage, but with `indexContent: true` the text taken out of them is stored unencrypted by
+  the backend: in your database with the SQL backend, in Meilisearch with that one. Turn it on only where the index
+  is protected at rest.
+</Callout>
+
+## Search a room
+
+`search.query` takes:
+
+<TypeTable
+  type={{
+    roomId: { type: 'string', description: 'The room to search.', required: true },
+    q: {
+      type: 'string',
+      description: 'The query, 1 to 200 characters after trimming.',
+      required: true,
+    },
+    kind: { type: "'folder' | 'document'", description: 'Only folders, or only documents.' },
+    limit: { type: 'number', description: 'Results returned, a whole number from 1 to 100.', default: '50' },
+  }}
+/>
+
+The query is normalized (Unicode NFKC, lower case, whitespace folded) and split into words; up to 8 distinct words
+are used. Each result is `{ nodeId, kind, name, parentId, score, snippet? }`, sorted by score and then by name.
+`snippet` is a short excerpt around the first matching word, present only when the document's text matched and the
+caller may read it (see below).
+
+In the browser the same endpoint is on the client, without `tenantId` when the client was created with one:
+
+```ts
+import { createBetterFilesClient } from 'better-files/client';
+
+const files = createBetterFilesClient<typeof dr>({ tenantId });
+const hits = await files.search.query({ roomId, q: 'lease', kind: 'document' });
+```
+
+Over HTTP it is `POST /api/better-files/search/query`.
+
+## What a caller can see
+
+`search.query` is authorized as `better-files:documents:list` on the room, which every room relation holds, and it
+also works on closed rooms. The results are then filtered in three steps:
+
+1. **From Better Files' tables, not the index.** Each candidate must be a node of the same tenant and the same room,
+   not in the trash, and of the requested `kind`. A stale index, or one Meilisearch index shared by every tenant,
+   cannot add anything.
+2. **`LIST` for the name.** A result is returned only when the caller's capability mask on that node includes
+   `LIST`. The mask comes from the permission matrix, with room settings, document flags and plugins applied, so a
+   hidden folder's contents never appear.
+3. **`VIEW` for the snippet.** The text excerpt is kept only when the caller has `VIEW` on the document. On a
+   document flagged view-only or no-copy, `COPY_TEXT` is needed as well, so search cannot be used to read a
+   protected document as text. Without it, the document can still be found by its name or text, but the result
+   has no `snippet`.
+
+Room administrators hold every capability, and auditors (`better-files:activity:export`) get `LIST` and `VIEW`
+everywhere in the room, so both see every match.
+
+<Callout type="info">
+  A match on text the caller may not read still returns the document's name, if they may list it. Someone with
+  `LIST` but not `VIEW` learns that the document contains the words. If that is too much, keep `indexContent` off,
+  or do not give `LIST` on such documents.
+</Callout>
+
+## Keep the index up to date
+
+The plugin follows events published after each change:
+
+| Event | What the index does |
+| --- | --- |
+| `document.uploaded`, `version.created`, `version.restored`, `version.scanned` | Reads the current version again: name and text |
+| `folder.created`, `folder.renamed`, `document.renamed` | Updates the name and keeps the text it has |
+| `room.deleted` | Drops every entry of the room |
+
+Text is extracted only from a version whose status is `ready`, so a file held for a virus scan is indexed by name
+until its `version.scanned` event. If an extractor throws, the plugin logs a warning (`Text extraction failed`) and
+indexes the document by name only.
+
+Trashed and moved items need no update: trash state and location are read from Better Files' tables at query time.
+The plugin adds no work to `dr.maintain()`.
+
+### Rebuild a room's index
+
+Files uploaded before you added the plugin, or before you turned on `indexContent`, are not in the index. Rebuild a
+room with `search.reindex`:
+
+```ts
+const { indexed } = await dr.api.search.reindex(credential, { tenantId, roomId });
+```
+
+It needs `better-files:search:reindex` on the room, which the plugin's access model gives to owners and admins. It
+reads and extracts every live document of the room within the request, so on a large room run it from a script or
+a background job rather than from a page. `indexed` counts the folders and documents below the root. Entries of
+items already in the trash are not removed, but they are never returned.
+
+## Text extractors
+
+An `Extractor` has an `id`, `accepts({ mimeType, filename, head })` (where `head` is the first 16 bytes) and
+`extract(bytes)`, which returns the text. Two are included:
+
+- `plainTextExtractor` (`id: 'text'`): UTF-8 files whose MIME type is `text/*` or JSON, XML, CSV, YAML or Markdown,
+  or whose name ends in `.txt`, `.md`, `.csv`, `.tsv`, `.json`, `.xml`, `.yaml`, `.yml`, `.log`, `.html` or `.htm`.
+- `pdfExtractor` (`id: 'pdf'`): files that start with `%PDF-`, through `unpdf`. `unpdf` is an optional peer
+  dependency; install it to index PDFs.
+
+```ts
+import { pdfExtractor, plainTextExtractor, searchPlugin, type Extractor } from 'better-files/plugin-search';
+
+const docx: Extractor = {
+  id: 'docx',
+  accepts: ({ filename }) => filename.toLowerCase().endsWith('.docx'),
+  extract: async (bytes) => myDocxToText(bytes),
+};
+
+searchPlugin({ indexContent: true, extractors: [plainTextExtractor, pdfExtractor, docx] });
+```
+
+Passing `extractors` replaces the defaults, so list them again if you still want them.
+
+## Backends
+
+| Backend | Where the index lives | Matching |
+| --- | --- | --- |
+| `sqlSearchBackend()` | The `searchEntries` table in your database | Substring: every word must appear in the name or text; name matches rank first |
+| `meilisearchBackend(options)` | A Meilisearch index, over its HTTP API (no SDK) | Typo tolerance, prefix matching and relevance ranking |
+
+The SQL backend needs no other service and suits rooms of up to tens of thousands of items. For larger rooms, or to
+keep extracted text out of your database, use Meilisearch (version 1.3 or later):
+
+```ts
+import { meilisearchBackend, searchPlugin } from 'better-files/plugin-search';
+
+searchPlugin({
+  indexContent: true,
+  backend: meilisearchBackend({
+    host: process.env.MEILI_HOST!,
+    apiKey: process.env.MEILI_KEY!, // a key that can manage the index, kept on the server
+  }),
+});
+```
+
+<TypeTable
+  type={{
+    host: {
+      type: 'string',
+      description: 'The Meilisearch URL, such as https://search.example.com or http://127.0.0.1:7700.',
+      required: true,
+    },
+    apiKey: {
+      type: 'string',
+      description: 'A key allowed to manage the index and its documents (not a search-only key). Sent as a bearer token.',
+    },
+    index: {
+      type: 'string',
+      description: 'The index uid. One index holds every tenant; queries always filter by tenant and room.',
+      default: "'better-files'",
+    },
+    snippetLength: {
+      type: 'number',
+      description: 'Characters of context around a match in snippets (Meilisearch counts words; this is divided by 6).',
+      default: '160',
+    },
+    waitForWrites: {
+      type: 'boolean',
+      description: 'Wait for each write to be applied before returning, so a search right after an upload finds it.',
+      default: 'false',
+    },
+    taskTimeoutMs: {
+      type: 'number',
+      description: 'How long to wait for one Meilisearch task.',
+      default: '10000',
+    },
+    fetch: {
+      type: 'typeof fetch',
+      description: 'For tests, proxies and runtimes without a global fetch.',
+    },
+  }}
+/>
+
+The backend creates the index on first use and configures it: `tenantId`, `roomId` and `kind` filterable, and
+`name` searched before `text`. Meilisearch document ids allow only a few characters, so ids are derived from the
+tenant and node id with `meilisearchId(tenantId, nodeId)`. Without `waitForWrites`, Meilisearch applies writes
+asynchronously, usually within milliseconds.
+
+### A backend of your own
+
+A backend implements `SearchBackend`. It only has to find candidates; it never decides who may see what.
+
+| Method | Does |
+| --- | --- |
+| `upsert(document, { db })` | Adds or replaces the entry for `document.nodeId`. When `document.text` is undefined (a rename), keep the text and `versionId` you already hold |
+| `removeRoom({ tenantId, roomId }, { db })` | Drops every entry of a deleted room |
+| `query(query, { db })` | Returns `{ nodeId, score, snippet? }[]` for `{ tenantId, roomId, q, words, kind?, match?, limit }` |
+| `texts({ tenantId, nodeIds }, { db })` | The indexed text of these nodes, for the [AI plugin](/docs/plugins/ai) |
+
+`match` is `all` (every word must match, the search box) or `any` (more matching words rank higher, used by the AI
+plugin). A higher `score` ranks first. The plugin exposes its backend as `searchPlugin(...).backend`.
+
+## Activity
+
+Each search records `search.performed` in the room's activity log, with the first 100 characters of the query and
+the number of results. The entry goes to the activity log only; it is not published as an event. Queries can name
+what people are interested in, so treat the activity log as confidential.
+
+## Errors
+
+| Code | When |
+| --- | --- |
+| `INVALID_INPUT` | `q` is empty or longer than 200 characters, or `limit` is outside 1 to 100 |
+| `FORBIDDEN` | the caller lacks `better-files:documents:list` on the room (or `better-files:search:reindex` for `reindex`) |
+| `INTERNAL_ERROR` | a Meilisearch request or task failed or timed out |
+
+## Limits
+
+- The SQL backend matches substrings. It has no typo tolerance, stemming or relevance ranking beyond name matches.
+- At most `candidateLimit` candidates are fetched before permission filtering. With the SQL backend these are the
+  first entries holding the query's longest word, in no particular order, so on a very large room a match can be
+  missed when the word is common. Use Meilisearch there.
+- Text beyond `maxTextLength` characters, and files above `maxFileBytes`, are not searchable by content.
+- Search covers one room per call.
+
+## Related
+
+- [AI answers](/docs/plugins/ai): questions answered from the same index.
+- [Sync](/docs/plugins/sync): mirror what a person can see.
+- [Better IAM integration](/docs/guides/better-iam)

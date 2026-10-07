@@ -1,0 +1,213 @@
+---
+title: Email to a room
+description: Per-folder drop addresses that file email attachments into a data room, with sender allow-lists and provider authentication checks.
+metaTitle: Email attachments into a data room
+icon: Inbox
+packages: ['@better-files/plugin-inbound']
+sources:
+  - packages/plugin-inbound/src/index.ts
+  - packages/plugin-inbound/README.md
+  - packages/plugin-inbound/package.json
+  - packages/core/src/plugin.ts
+  - packages/core/src/operations.ts
+  - packages/server/src/http.ts
+  - tests/plugins/inbound.test.ts
+---
+
+Sellers, auditors and outside counsel often send documents by email instead of uploading them. Someone on the deal
+team then saves each attachment and uploads it to the right folder by hand, and the room's records do not say where
+the file came from.
+
+The inbound plugin gives a folder one or more **drop addresses**. Attachments sent to a drop address become documents
+in that folder, filed through the normal upload path: encrypted, versioned, scanned and logged. Your mail provider
+receives the email and calls a webhook route in your app; that route hands the message to Better Files.
+
+```ts
+import { betterFiles } from 'better-files';
+import { deliverEmail, fromPostmark, inboundPlugin } from 'better-files/plugin-inbound';
+
+const inbound = { domain: 'in.example.com', deliverySecret: process.env.INBOUND_SECRET! };
+const plugins = [inboundPlugin(inbound)] as const;
+
+export const dr = betterFiles({ /* iam, database, storage, secret */ plugins });
+
+// A room member creates an address for a folder.
+const { address } = await dr.api.inbound.createAddress(credential, {
+  tenantId,
+  nodeId: folderId,
+  allowedSenders: ['@seller.com'],
+});
+// room+acme.Zp3…@in.example.com
+```
+
+The plugin declares no Better IAM actions of its own (its address operations use the core
+`better-files:documents:*` actions), so `betterFilesIamPlugin({ plugins })` needs nothing extra for it. It owns one
+table, `inboundAddresses`; on a SQL database, run `better-files generate` and `better-files migrate` after adding it.
+
+## Options
+
+<TypeTable
+  type={{
+    domain: {
+      type: 'string',
+      description: 'The mail domain your provider receives mail for, such as in.example.com.',
+      required: true,
+    },
+    deliverySecret: {
+      type: 'string',
+      description: 'Shared between the plugin and your webhook route; inbound.deliver refuses calls without it. At least 32 characters, or inboundPlugin() throws INVALID_CONFIG.',
+      required: true,
+    },
+    prefix: {
+      type: 'string',
+      description: 'The start of the local part of every drop address.',
+      default: "'room'",
+    },
+    requireAuthentication: {
+      type: 'boolean',
+      description: 'Accept only messages your provider says passed sender authentication (SPF, DKIM or DMARC).',
+      default: 'true',
+    },
+    maxAttachmentBytes: {
+      type: 'number',
+      description: 'The largest attachment filed. Larger ones are skipped and reported.',
+      default: '50 MiB',
+    },
+  }}
+/>
+
+## Drop addresses
+
+A drop address looks like `room+{tenantId}.{token}@{domain}`. The token is 24 random characters. Better Files stores
+only its SHA-256 hash, so the full address is shown once, in the answer to `createAddress`. Keep it like a password:
+anyone who knows it, and passes the sender checks, can file documents into the folder.
+
+| Endpoint | Input | Permission | Returns |
+| --- | --- | --- | --- |
+| `inbound.createAddress` | `nodeId`, `label?`, `allowedSenders?`, `expiresInDays?` | `better-files:documents:upload`, `UPLOAD` on the folder | The address record and `address` |
+| `inbound.list` | `roomId` | `better-files:documents:list` on the room (also when closed) | Active addresses on folders where the caller has `UPLOAD` |
+| `inbound.revoke` | `addressId` | `better-files:documents:upload`, `UPLOAD` on the address's folder | `{ revoked: true }` |
+
+- `nodeId` must be a folder (`INVALID_INPUT` otherwise).
+- `label` is up to 120 characters, for your own interface.
+- `allowedSenders` holds up to 100 entries, each a full address (`sam@seller.com`) or a domain starting with `@`
+  (`@seller.com`). An empty list allows any sender.
+- `expiresInDays` (1 to 3650) makes the address stop working after that many days.
+- Documents arrive as uploads by the person who created the address, so that person's access to the folder decides
+  whether the address is useful. Records returned by `createAddress` and `list` include `createdBy` and `lastUsedAt`.
+
+In the browser, the [typed client](/docs/frameworks/client) offers the same calls without `tenantId`:
+`files.inbound.createAddress({ nodeId, allowedSenders })`.
+
+## Wire up your mail provider
+
+Point your provider's inbound processing for `domain` at a route in your app (for example an MX record for
+`in.example.com` and an inbound webhook URL). In that route:
+
+<Steps>
+<Step>
+
+**Verify the provider's webhook.** Check its signature, basic-auth credentials or source addresses, as your provider
+documents. Better Files does not do this for you.
+
+</Step>
+<Step>
+
+**Normalize the message.** `fromPostmark(payload)` turns a Postmark inbound payload into an `InboundMessage`. For
+another provider, build the object yourself (below).
+
+</Step>
+<Step>
+
+**Call `deliverEmail(dr, options, message)`.** It files the message into every drop address in `to` and ignores
+recipients that are not drop addresses for your `domain` and `prefix`.
+
+</Step>
+</Steps>
+
+```ts title="app/api/inbound/postmark/route.ts"
+import { deliverEmail, fromPostmark } from 'better-files/plugin-inbound';
+import { dr, inbound } from '@/server/better-files';
+
+export async function POST(request: Request) {
+  // Verify the request came from Postmark first.
+  const outcomes = await deliverEmail(dr, inbound, fromPostmark(await request.json()));
+  return Response.json({ outcomes });
+}
+```
+
+`deliverEmail` returns one entry per drop address: `{ to, filed, skipped }`, where `filed` lists
+`{ nodeId, filename }` and `skipped` lists `{ filename, reason }`. It throws `INVALID_CONFIG` when the instance has
+no `inboundPlugin()`.
+
+`fromPostmark` reads recipients from `ToFull` (or `To`), the sender from `FromFull` (or `From`), the subject, and the
+base64 attachments. It sets `authenticated` when the `Authentication-Results` header reports `dkim=pass` or
+`dmarc=pass`, or the `Received-SPF` header starts with `pass`.
+
+### Other providers
+
+Any provider works if you produce an `InboundMessage`:
+
+<TypeTable
+  type={{
+    to: { type: 'string[]', description: 'Every recipient address; non-drop addresses are ignored.', required: true },
+    from: { type: 'string', description: 'The sender, as an address or "Name <address>".', required: true },
+    subject: { type: 'string', description: 'Recorded in the version comment.' },
+    authenticated: {
+      type: 'boolean',
+      description: "Your provider's verdict that the sender passed SPF, DKIM or DMARC.",
+      required: true,
+    },
+    attachments: {
+      type: '{ filename: string; contentType?: string; content: Uint8Array }[]',
+      description: 'The files to store.',
+      required: true,
+    },
+  }}
+/>
+
+`parseDropAddress(address, { domain, prefix })` returns `{ tenantId, token }` for a drop address, or `undefined`,
+if you need to route messages yourself.
+
+<Callout type="warn" title="Call deliverEmail in process">
+  `inbound.deliver` is a public operation guarded only by `deliverySecret`, so it is also reachable on the protocol
+  route (`POST /api/better-files/inbound/deliver`). Keep the secret on the server. Call `deliverEmail` in your
+  webhook route rather than posting to the protocol: the protocol limits JSON bodies (`maxJsonBodyBytes`, 64 KiB by
+  default), which base64 attachments quickly exceed.
+</Callout>
+
+## What delivery checks
+
+For each drop address, in order:
+
+1. The delivery secret matches, compared in constant time. Otherwise `UNAUTHENTICATED`.
+2. The address exists, is not revoked and has not expired. Otherwise `FORBIDDEN`, "Unknown or expired drop address".
+3. With `requireAuthentication`, the message is `authenticated`. Otherwise `FORBIDDEN`, "The message failed sender
+   authentication".
+4. The sender matches `allowedSenders`, compared without case. Otherwise `FORBIDDEN`, "The sender is not allowed for
+   this address".
+5. The folder still exists and is not in the trash. Otherwise `FORBIDDEN`, "The folder no longer exists".
+
+A refusal throws. Because `deliverEmail` handles addresses one after another, a refusal for one address stops the
+rest of the message; addresses already handled keep their files.
+
+A message carries at most 50 attachments. Each attachment's name has control characters, slashes and backslashes
+replaced with `_` (so `../../etc/passwd` becomes `.._.._etc_passwd`), and is cut to 255 characters. Attachments over
+`maxAttachmentBytes` are skipped with the reason `too large`. The content type, when given, becomes the version's MIME
+type.
+
+## What gets recorded
+
+- Each attachment becomes a document, or a new version of a same-named document, as the address's creator. The
+  version comment is `By email from {sender}: {subject}`.
+- Scanning, processing and quotas apply as for any upload, through those plugins.
+- The room's activity log gets `inbound.address-created` when an address is created, and `inbound.received` per
+  delivery, with the sender and the counts of filed and skipped files. Revoking an address is not logged.
+- Every refusal after the secret check publishes `inbound.refused` to `dr.events` at once, with the `reason` and the
+  sender, so you can alert on spoofing attempts.
+
+## Related
+
+- [Virus scanning](/docs/plugins/scan): emailed files are scanned like uploads
+- [Document processing](/docs/plugins/processing)
+- [Next.js](/docs/frameworks/nextjs)

@@ -1,0 +1,38 @@
+---
+title: Reference
+description: Generated reference for Better Files - every core operation, Better IAM action, capability, error code and package.
+icon: Code
+---
+
+These pages are generated from the repository by `apps/docs/scripts/generate.mjs` each time the site is built, so
+they always match the code. The guides explain the ideas; the reference lists every name.
+
+<Cards>
+  <Card title="Operations" href="/docs/reference/operations" icon="ListTree">
+    Every core operation: its Better IAM action, its target, and the capabilities it requires.
+  </Card>
+  <Card title="Actions" href="/docs/reference/actions" icon="ShieldCheck">
+    The `better-files:` actions Better IAM decides on, and which room relations grant them.
+  </Card>
+  <Card title="Capabilities" href="/docs/reference/capabilities" icon="Scale">
+    The capability bits of the permission matrix and the presets that bundle them.
+  </Card>
+  <Card title="Errors" href="/docs/reference/errors" icon="OctagonAlert">
+    Every error code with its HTTP status and meaning.
+  </Card>
+  <Card title="Packages" href="/docs/reference/packages" icon="Package">
+    Every published package and the umbrella subpath it is available under.
+  </Card>
+  <Card title="Changelog" href="/docs/reference/changelog" icon="History">
+    What changed in each release.
+  </Card>
+</Cards>
+
+## Machine-readable
+
+- [`/llms.txt`](/llms.txt) lists every page with its description; [`/llms-full.txt`](/llms-full.txt) holds the
+  whole documentation as plain text, for AI assistants and agents.
+- Every page is also available as Markdown at `/llms.mdx/docs/...`, for example
+  [`/llms.mdx/docs/guides/quickstart`](/llms.mdx/docs/guides/quickstart).
+- A running instance describes its own HTTP API: `dr.openapi()` returns an OpenAPI 3.1 document of every core and
+  plugin operation, and `better-files openapi` writes it to a file.

@@ -1,0 +1,69 @@
+---
+title: Fastify
+metaTitle: Better Files for Fastify
+description: A Fastify plugin that answers the protocol before body parsing so uploads stream, decorates requests with the bound API, and guards routes in preHandler.
+icon: Fastify
+packages:
+  - '@better-files/middleware'
+sources:
+  - packages/middleware/src/fastify.ts
+  - packages/middleware/src/index.ts
+  - docs/guides/frameworks/fastify.md
+---
+
+`better-files/middleware/fastify` answers the protocol in an `onRequest` hook. That hook runs before Fastify parses
+the body, so uploads and downloads stream. Every other request gets `request.betterFiles`.
+
+```ts title="server.ts"
+import Fastify from 'fastify';
+import { betterFilesFastify, requireCapability } from 'better-files/middleware/fastify';
+import { dr } from './better-files';
+
+await dr.initialize();
+
+const app = Fastify();
+await app.register(betterFilesFastify, { dr }); // or: await betterFilesFastify(app, { dr })
+
+app.get<{ Params: { tenantId: string; roomId: string; nodeId: string } }>(
+  '/deals/:tenantId/:roomId/documents/:nodeId',
+  {
+    preHandler: requireCapability(dr, ['VIEW'], {
+      tenantId: (request) => (request.params as { tenantId: string }).tenantId,
+      roomId: (request) => (request.params as { roomId: string }).roomId,
+      nodeId: (request) => (request.params as { nodeId: string }).nodeId,
+    }),
+  },
+  async (request) =>
+    request.betterFiles!.api.documents.get({
+      tenantId: request.params.tenantId,
+      nodeId: request.params.nodeId,
+    }),
+);
+
+await app.listen({ port: 3000 });
+```
+
+- **Not encapsulated.** The plugin sets `skip-override`, as `fastify-plugin` does, so `request.betterFiles` exists in
+  every route, including routes registered in child contexts.
+- **`request.betterFiles`** holds `{ credential, api }`.
+- **`requireCapability(dr, capabilities, select)`** is a `preHandler`. On a refusal it replies with the protocol's
+  error body and status, and your handler does not run.
+- **Your own errors.** Errors thrown from `dr.api` calls carry `status` and `code`. Map them in `setErrorHandler`, for
+  example with `errorResponse(error)` from `better-files/middleware`:
+
+```ts
+import { errorResponse } from 'better-files/middleware';
+
+app.setErrorHandler((error, _request, reply) => {
+  const { status, body } = errorResponse(error);
+  if (status === 500) throw error;
+  return reply.code(status).send(body);
+});
+```
+
+<Callout type="warn" title="Proxies">
+  Fastify's own `trustProxy` does not change what Better Files sees. Behind a proxy you control, also set
+  `trustProxy: true` on `betterFiles()`.
+</Callout>
+
+To use Fastify under NestJS, see [NestJS](/docs/frameworks/nestjs#fastify-platform).

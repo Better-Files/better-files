@@ -1,0 +1,63 @@
+{
+  "name": "@better-files/plugin-audit",
+  "version": "0.1.0",
+  "description": "Audit reports for Better Files: participants, the access matrix by group and folder, engagement per person and activity-chain integrity, as JSON or a PDF for closing binders and access reviews",
+  "type": "module",
+  "license": "Apache-2.0",
+  "author": "Better Files contributors",
+  "homepage": "https://github.com/Better-Files/better-files/tree/main/packages/plugin-audit#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Better-Files/better-files.git",
+    "directory": "packages/plugin-audit"
+  },
+  "bugs": {
+    "url": "https://github.com/Better-Files/better-files/issues"
+  },
+  "keywords": [
+    "data-room",
+    "better-iam",
+    "typescript",
+    "audit",
+    "report",
+    "compliance",
+    "access-review"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "sideEffects": false,
+  "scripts": {
+    "build": "tsc -b"
+  },
+  "dependencies": {
+    "@better-files/core": "workspace:*"
+  },
+  "peerDependencies": {
+    "pdf-lib": "^1.17.0"
+  },
+  "peerDependenciesMeta": {
+    "pdf-lib": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "pdf-lib": "^1.17.1"
+  }
+}

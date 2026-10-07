@@ -1,0 +1,195 @@
+---
+title: NDA gating
+description: Per-room non-disclosure agreements with versions, acceptances tied to the exact text, and room content withheld until accepted.
+metaTitle: NDA gating for data rooms
+icon: Signature
+packages: ['@better-files/plugin-nda']
+sources:
+  - packages/plugin-nda/src/index.ts
+  - packages/plugin-nda/README.md
+  - packages/core/src/plugin.ts
+  - packages/core/src/operations.ts
+  - packages/server/src/pipeline.ts
+  - tests/plugins/nda-gate.test.ts
+  - tests/plugins/nda-watermark.test.ts
+---
+
+Before a buyer or an outside adviser opens anything in a deal room, the sell side usually wants them to accept a
+non-disclosure agreement (NDA). The deal team needs to change the text mid-process and ask everyone to accept again,
+and later prove who accepted which wording, when, and from where.
+
+The NDA plugin adds one NDA per room. Until a participant accepts the current version, the room shows them its index
+only: they see folder and document names, and nothing else. Room owners and administrators are exempt.
+
+```ts
+import { betterFiles } from 'better-files';
+import { betterFilesIamPlugin } from 'better-files/iam';
+import { ndaPlugin } from 'better-files/plugin-nda';
+
+const plugins = [ndaPlugin()] as const;
+const iamPlugin = betterFilesIamPlugin({ plugins }); // registers the better-files:nda:* actions
+
+export const dr = betterFiles({ /* iam, database, storage, secret */ plugins });
+
+// A room administrator publishes the NDA.
+await dr.api.nda.publish(credential, {
+  tenantId,
+  roomId,
+  title: 'Project Falcon NDA',
+  text: 'The recipient shall keep confidential…',
+});
+
+// A participant reads it and accepts that version.
+const { nda, required } = await dr.api.nda.get(credential, { tenantId, roomId });
+if (nda && required) await dr.api.nda.accept(credential, { tenantId, roomId, version: nda.version });
+```
+
+`ndaPlugin()` takes no options. The plugin owns two tables, `ndaVersions` and `ndaAcceptances`; on a SQL database,
+run `better-files generate` and `better-files migrate` after adding it.
+
+## What a pending NDA withholds
+
+A participant has a **pending** NDA when the room has an active NDA, they are not an owner or administrator of the
+room, the NDA applies to them, and they have not accepted its current version. While it is pending:
+
+- **Folders and documents.** The plugin's `clampCapabilities` hook removes every capability except `LIST` on every
+  node of the room. The participant can list names, but cannot view, print, copy text, download, upload, edit,
+  delete or manage.
+- **Plugin room features.** The plugin's `gateRoom` hook refuses room operations added by other plugins, such as
+  Q&A, room-wide annotations, tasks and AI questions, with `FORBIDDEN` and the message
+  `Accept the NDA "<title>" first`.
+- **What stays open.** Core room operations (the room itself, its index, membership) and this plugin's own
+  `nda.get` and `nda.accept`.
+
+`appliesTo` decides who must accept:
+
+- `everyone` (the default): every participant who is not an owner or administrator.
+- `external`: only guests, the principals Better IAM marks as from outside the organization. Employees are not
+  asked.
+
+The exemption checks the person's own relation on the room roster (`owner` or `admin`).
+
+## Endpoints
+
+Every call takes the `tenantId` and a credential, like any `dr.api` call. In the browser the same endpoints are on the
+client as `client.nda.<endpoint>(input)`, without `tenantId` when the client was created with one, and over HTTP as
+`POST /api/better-files/nda/<endpoint>`.
+
+| Endpoint | Target | Action | Who (access model) |
+| --- | --- | --- | --- |
+| `publish` | room | `better-files:nda:manage` | owners, admins |
+| `acceptances` | room | `better-files:nda:manage` | owners, admins |
+| `get` | room | `better-files:nda:accept` | every room relation |
+| `accept` | room | `better-files:nda:accept` | every room relation |
+
+`get`, `accept` and `acceptances` also work on closed rooms. `publish` is refused on a closed or archived room.
+
+### Publish a version
+
+`nda.publish` always creates a new version, numbered one above the last. Fields you leave out are copied from the
+previous version.
+
+<TypeTable
+  type={{
+    roomId: { type: 'string', description: 'The room.', required: true },
+    title: {
+      type: 'string',
+      description: '1 to 200 characters.',
+      default: "the previous title, or 'Non-disclosure agreement'",
+    },
+    text: {
+      type: 'string',
+      description: 'The agreement, 1 to 100,000 characters. The first active version needs one.',
+      default: 'the previous text',
+    },
+    appliesTo: {
+      type: "'everyone' | 'external'",
+      description: 'Who must accept: every participant, or only guests from outside the organization.',
+      default: "the previous value, or 'everyone'",
+    },
+    active: {
+      type: 'boolean',
+      description: 'false publishes a version that turns the NDA off for the room.',
+      default: 'true',
+    },
+  }}
+/>
+
+It returns the new `NdaVersion`: `id`, `roomId`, `version`, `title`, `text`, `appliesTo`, `active`, `createdBy`,
+`createdAt`.
+
+Because acceptances are per version, publishing a new version asks everyone to accept again, even when only the title
+changed. To turn the NDA off, publish `{ roomId, active: false }`; to turn it back on, publish again with
+`active: true` (the text carries over).
+
+### Read and accept
+
+`nda.get` returns `{ nda, required }`: the current active version (or `null` when the room has none) and whether the
+caller still has to accept it. Show the text, then call `nda.accept` with the version you showed:
+
+```ts
+await dr.api.nda.accept(credential, { tenantId, roomId, version: 2 });
+```
+
+`accept` returns the `NdaAcceptance`. If that version is no longer the current one, it fails with `CONFLICT`, so
+nobody accepts a text they were not shown. Accepting the same version twice returns the first acceptance.
+
+Each acceptance records:
+
+- the room, the version and the identity;
+- the person's name and email, when the identity system provides them;
+- the request's IP address and user agent (cut to 512 characters), when the request carries them;
+- `textSha256`, the SHA-256 hash of the exact text accepted, so you can later prove which wording it was.
+
+### List acceptances
+
+`nda.acceptances` lists the room's acceptances, oldest first. Pass `version` to limit the list to one version.
+
+```ts
+const accepted = await dr.api.nda.acceptances(credential, { tenantId, roomId, version: 2 });
+```
+
+## Permissions
+
+The plugin works on both layers of the access model:
+
+1. **The permission matrix (layer A).** A pending NDA removes capabilities after the matrix is resolved. It never
+   adds any: a participant who accepts gets back exactly what the matrix gives them.
+2. **Better IAM (layer B).** The endpoints are authorized on the actions above. The access model grants
+   `better-files:nda:manage` to owners and admins and `better-files:nda:accept` to every room relation (`owner`,
+   `admin`, `publisher`, `editor`, `contributor`, `viewer`, `auditor`). Pass the plugin to `betterFilesIamPlugin`
+   so the actions join Better IAM's permission catalog.
+
+## Activity and events
+
+| Activity entry and event | When | Metadata |
+| --- | --- | --- |
+| `nda.published` | an active version is published | `version`, `title`, `appliesTo` |
+| `nda.disabled` | a version with `active: false` is published | `version`, `title`, `appliesTo` |
+| `nda.accepted` | a participant accepts | `version` (the event also carries `identityId`) |
+
+Subscribe with `dr.events.subscribe('nda.*', handler)`, or forward them with the
+[webhooks plugin](/docs/plugins/webhooks).
+
+## Errors
+
+| Code | When |
+| --- | --- |
+| `FORBIDDEN` | a plugin room feature is used while the NDA is pending, or the caller lacks the action |
+| `INVALID_INPUT` | the first active version has no `text` |
+| `NOT_FOUND` | `accept` on a room with no active NDA |
+| `CONFLICT` | `accept` names a version that is no longer current |
+
+## Limits
+
+- One NDA per room. Tenant-wide NDAs are not supported.
+- The plugin does not render or sign a document. To collect a signature on a PDF, use the
+  [e-signature plugin](/docs/plugins/esign).
+- Exemption looks at the person's own relation on the room. Someone who is an administrator only through a group
+  is asked to accept like anyone else.
+
+## Related
+
+- [Watermarking](/docs/plugins/watermark): stamp who downloaded what, once the NDA is accepted.
+- [Network rules](/docs/plugins/network): limit a room to known networks.
+- [Better IAM integration](/docs/guides/better-iam)

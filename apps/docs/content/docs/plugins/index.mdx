@@ -1,0 +1,229 @@
+---
+title: Plugins
+description: Opt-in features for data rooms, from NDAs and watermarks to Q&A, e-signature and AI, each one a plugin you add to betterFiles().
+icon: Puzzle
+packages: ['better-files', '@better-files/core', '@better-files/iam']
+sources:
+  - packages/core/src/plugin.ts
+  - packages/iam/src/index.ts
+  - packages/better-files/src/index.ts
+---
+
+The core of Better Files covers what every data room needs: rooms, folders, documents and versions, the permission
+matrix, members and groups, uploads and downloads, and the activity log. Everything else is a **plugin**: NDAs,
+watermarks, share links, due-diligence Q&A, search, e-signature, AI answers and more. You add only the plugins your
+product uses, so an app that never shows a watermark does not load PDF tools.
+
+Each plugin ships in its own package and is also a subpath of the umbrella package, so one install covers all of
+them:
+
+```npm
+npm install better-files better-iam
+```
+
+## Adding a plugin
+
+Pass the plugin to `betterFiles({ plugins })`. Most plugins also add actions that Better IAM authorizes, so pass the
+**same list** to `betterFilesIamPlugin({ plugins })`, which registers those actions in Better IAM's permission
+catalog:
+
+```ts
+import { betterIam } from 'better-iam';
+import { betterFiles } from 'better-files';
+import { betterFilesIamPlugin, betterIamIntegration } from 'better-files/iam';
+import { ndaPlugin } from 'better-files/plugin-nda';
+import { qaPlugin } from 'better-files/plugin-qa';
+import { watermarkPlugin } from 'better-files/plugin-watermark';
+
+const plugins = [ndaPlugin(), watermarkPlugin(), qaPlugin()] as const;
+const iamPlugin = betterFilesIamPlugin({ plugins });
+
+export const iam = betterIam({ /* … */ plugins: [iamPlugin] });
+export const dr = betterFiles({
+  iam: betterIamIntegration(iam, { iamPlugin }),
+  plugins,
+  /* database, storage, secret */
+});
+```
+
+<Callout type="warn" title="Keep the two lists in sync">
+  When `iamPlugin` is passed to `betterIamIntegration`, `betterFiles()` checks at startup that every action of every
+  plugin is registered, and refuses to start if one is missing. Without that check, Better IAM would deny every call
+  to the missing action.
+</Callout>
+
+`as const` keeps the plugins' literal types, so `dr.api` and the browser client know each plugin's endpoints, their
+inputs and their results: `dr.api.qa.ask(...)` is typed, and so is `createBetterFilesClient<typeof dr>()`.
+
+## Catalog
+
+### Access and security
+
+<Cards>
+  <Card title="NDA gating" href="/docs/plugins/nda" icon="Handshake">
+    Versioned per-room agreements; content stays hidden until the agreement is accepted.
+  </Card>
+  <Card title="Watermarks" href="/docs/plugins/watermark" icon="Stamp">
+    Identity, time and a forensic code stamped on viewed and downloaded PDFs and images.
+  </Card>
+  <Card title="Share links" href="/docs/plugins/links" icon="Link2">
+    Links with passwords, email capture, expiry and use caps.
+  </Card>
+  <Card title="Network rules" href="/docs/plugins/network" icon="Globe">
+    Per-room IP allow-lists for guests or everyone.
+  </Card>
+  <Card title="Download guard" href="/docs/plugins/guard" icon="ShieldAlert">
+    Download rate limits and anomaly reports to Better IAM threat detection.
+  </Card>
+  <Card title="Virus scanning" href="/docs/plugins/scan" icon="ShieldCheck">
+    ClamAV scanning, with uploads quarantined until clean.
+  </Card>
+</Cards>
+
+### Governance
+
+<Cards>
+  <Card title="Legal holds" href="/docs/plugins/retention" icon="LockKeyhole">
+    Preserve rooms or folders against deletion and purges.
+  </Card>
+  <Card title="Access reviews" href="/docs/plugins/reviews" icon="ClipboardCheck">
+    Periodic certification of who may still be in each room.
+  </Card>
+  <Card title="Audit reports" href="/docs/plugins/audit" icon="ScrollText">
+    Participants, access by group and folder, engagement and chain integrity, as JSON or PDF.
+  </Card>
+  <Card title="Storage quotas" href="/docs/plugins/quotas" icon="HardDrive">
+    Byte, document and file-size limits per room and tenant.
+  </Card>
+  <Card title="Redaction" href="/docs/plugins/redaction" icon="VenetianMask">
+    Find sensitive text and burn it out of PDFs and images.
+  </Card>
+</Cards>
+
+### Collaboration
+
+<Cards>
+  <Card title="Q&A" href="/docs/plugins/qa" icon="MessageCircleQuestionMark">
+    Due-diligence questions and answers with team-scoped visibility.
+  </Card>
+  <Card title="Tasks" href="/docs/plugins/tasks" icon="ClipboardList">
+    Checklists with assignees, due dates and linked documents.
+  </Card>
+  <Card title="Annotations" href="/docs/plugins/annotations" icon="FilePenLine">
+    Page-anchored notes and highlights, private, shared or room-wide.
+  </Card>
+  <Card title="Notifications" href="/docs/plugins/notifications" icon="Inbox">
+    Email alerts and daily digests with per-room preferences.
+  </Card>
+  <Card title="Analytics" href="/docs/plugins/analytics" icon="FileChartColumnIncreasing">
+    Engagement by document, person and group, and who has not opened what.
+  </Card>
+</Cards>
+
+### Documents in and out
+
+<Cards>
+  <Card title="E-signature" href="/docs/plugins/esign" icon="Signature">
+    Envelopes, signing order, an evidence chain and a certificate of completion.
+  </Card>
+  <Card title="Room templates" href="/docs/plugins/templates" icon="Layers">
+    Folder skeletons, groups, settings and checklists, built in or per tenant.
+  </Card>
+  <Card title="Email to a room" href="/docs/plugins/inbound" icon="Inbox">
+    Per-folder drop addresses whose attachments become documents.
+  </Card>
+  <Card title="Cloud drive imports" href="/docs/plugins/connectors" icon="RefreshCw">
+    Google Drive, Dropbox, OneDrive, SharePoint and Box into a room.
+  </Card>
+  <Card title="Document processing" href="/docs/plugins/processing" icon="FileType">
+    Office files to PDF so every format can be viewed and watermarked; thumbnails.
+  </Card>
+</Cards>
+
+### Discovery and integration
+
+<Cards>
+  <Card title="Search" href="/docs/plugins/search" icon="ListFilter">
+    Names and, if you opt in, document text, filtered by permission.
+  </Card>
+  <Card title="AI answers" href="/docs/plugins/ai" icon="Sparkles">
+    Questions and summaries on Claude, grounded only in documents the asker may view.
+  </Card>
+  <Card title="Sync" href="/docs/plugins/sync" icon="ArrowLeftRight">
+    Snapshots and a permission-aware changes feed for desktop and CLI mirrors.
+  </Card>
+  <Card title="Webhooks" href="/docs/plugins/webhooks" icon="Webhook">
+    Signed, retried webhooks with SSRF protection.
+  </Card>
+</Cards>
+
+## What a plugin can do
+
+A plugin is a plain object, usually returned by a factory such as `ndaPlugin(options)`. Its parts are all optional:
+
+<TypeTable
+  type={{
+    id: { type: 'string', description: 'Unique id; also the key of its endpoints in dr.api (dr.api.nda, dr.api.qa).', required: true },
+    endpoints: { type: 'Record<string, EndpointDefinition>', description: 'Operations served over HTTP and in dr.api, each authorized by both layers before its handler runs.' },
+    actions: { type: 'string[]', description: 'Better IAM actions the plugin authorizes, all in the better-files: namespace.' },
+    accessModel: { type: 'AccessGrant[]', description: 'Which room relations (owner, admin, viewer, …) may perform those actions.' },
+    schema: { type: 'Record<string, TableDefinition>', description: 'Tables of its own, created by dr.initialize() and the migration tools.' },
+    extendSchema: { type: 'Record<string, { additionalFields }>', description: 'Extra columns on core tables, typed in dr.$Infer.' },
+    capabilities: { type: 'Record<string, CapabilityDefinition>', description: 'New capability bits for the permission matrix.' },
+    hooks: { type: 'BetterFilesHooks', description: 'Before and after uploads and downloads, download transforms, capability clamps, room gates and retention checks.' },
+    maintain: { type: '(context) => Promise<void>', description: 'Periodic work run by dr.maintain().' },
+    jobs: { type: 'Record<string, JobDefinition>', description: 'Durable background jobs, enqueued by name.' },
+    onEvent: { type: '(event, context) => Promise<void>', description: 'Called for every published event (indexing, notifications, webhooks).' },
+    dependsOn: { type: 'string[]', description: 'Ids of plugins this one needs.' },
+  }}
+/>
+
+The hooks are how plugins change core behavior without forking it. A few examples from the first-party plugins:
+
+- `clampCapabilities` removes capabilities after the permission matrix has been resolved. The NDA plugin uses it to
+  hide content until the agreement is accepted; the scanner uses it to keep a quarantined version from being
+  downloaded.
+- `transformDownload` produces a variant of a document, such as a watermarked copy. A variant that no plugin
+  produces is refused, so a watermarked download never falls back to the original.
+- `gateRoom` runs after both authorization layers have allowed an operation, and can still refuse it with a reason
+  or an error code such as `NDA_REQUIRED`.
+- `retains` keeps content: while any plugin returns a reason (a legal hold), trashing, purging and deleting it are
+  refused.
+
+## Writing your own
+
+Your app can define plugins with the same API the first-party ones use. This one adds a read endpoint on documents,
+open to anyone who holds the `VIEW` capability on the node and a room relation that the access model grants:
+
+```ts
+import { definePlugin, endpoint, v } from 'better-files';
+
+export const notesPlugin = definePlugin({
+  id: 'notes',
+  actions: ['better-files:notes:read'],
+  accessModel: [{ relations: ['owner', 'admin', 'viewer'], actions: ['better-files:notes:read'] }],
+  endpoints: {
+    read: endpoint({
+      operation: {
+        action: 'better-files:notes:read',
+        target: 'node',
+        capabilities: ['VIEW'],
+        mutates: false,
+      },
+      input: v.object({ nodeId: v.id() }),
+      target: (input) => ({ nodeId: input.nodeId }),
+      handler: async (context, input) => ({ nodeId: input.nodeId, readBy: context.principal.id }),
+    }),
+  },
+});
+```
+
+`definePlugin` keeps the literal type, so `dr.api.notes.read(credential, { tenantId, nodeId })` is typed end to end.
+The endpoint never runs unless the caller passes both layers: the permission matrix (`VIEW` on that node) and a
+Better IAM decision on `better-files:notes:read`. Inputs accept `v` schemas or any
+[Standard Schema](https://standardschema.dev) validator, such as zod or valibot.
+
+## Related
+
+- [Better IAM integration](/docs/guides/better-iam): how plugin actions reach Better IAM's permission catalog.
+- [Next.js](/docs/frameworks/nextjs): plugin endpoints are served by the same route handler as the core.

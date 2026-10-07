@@ -1,0 +1,240 @@
+---
+title: Schema
+description: The tables Better Files creates, typed fields of your own on core tables, plugin tables, and generating the schema for your migration tool.
+metaTitle: Better Files schema and custom fields
+icon: Database
+packages: ['@better-files/core', '@better-files/server', '@better-files/adapter-sql', '@better-files/cli']
+sources:
+  - packages/core/src/schema.ts
+  - packages/core/src/tables.ts
+  - packages/core/src/plugin.ts
+  - packages/core/src/ports.ts
+  - packages/server/src/options.ts
+  - packages/server/src/index.ts
+  - packages/server/src/infer.ts
+  - packages/server/src/endpoints/common.ts
+  - packages/server/src/endpoints/rooms.ts
+  - packages/adapter-sql/src/index.ts
+  - packages/adapter-sql/src/generate.ts
+  - packages/adapter-sql/src/ddl.ts
+  - packages/adapter-prisma/src/index.ts
+  - packages/cli/src/cli.ts
+  - tests/server/rooms.test.ts
+  - tests/server/better-files.test.ts
+---
+
+Your app knows things about a deal room that Better Files does not: an internal deal code, the sector, the client
+it belongs to. You want those stored with the room, typed in your code, and returned by the API, without a side
+table to keep in sync. You may also run your own migration tool, which should know about every table in the
+database.
+
+Better Files describes its tables in one schema: the core tables, the tables plugins bring, and the fields you add.
+The same schema creates the tables (`dr.initialize()`), types your code (`dr.$Infer`), and can be printed as SQL,
+Prisma or Drizzle for your own migrations.
+
+```ts
+import { betterFiles, field } from 'better-files';
+
+export const dr = betterFiles({
+  // iam, database, storage, secret
+  schema: {
+    rooms: {
+      additionalFields: {
+        dealCode: field.string(),
+        sector: field.enum(['tech', 'health'] as const, { required: false }),
+      },
+    },
+  },
+});
+
+const room = await dr.api.rooms.create(credential, {
+  tenantId,
+  name: 'Project Falcon',
+  fields: { dealCode: 'D-42', sector: 'tech' },
+});
+room.dealCode; // string
+
+type Room = typeof dr.$Infer.Room; // includes dealCode and sector
+```
+
+## The core tables
+
+| Table | What it holds |
+| --- | --- |
+| `rooms` | Rooms: name, slug, status, settings, region, the head of the activity chain. |
+| `nodes`, `nodeClosure` | The folder tree, and every ancestor and descendant pair for fast subtree queries. |
+| `documents`, `versions` | Documents and their versions. |
+| `blobs`, `renditions` | Stored files with their wrapped data keys, and derived files such as PDFs of Office documents. |
+| `uploads`, `uploadParts` | Upload sessions and the parts received. |
+| `permissionGroups`, `aclEntries`, `members` | Permission groups, permission entries, and room rosters. |
+| `activity` | The hash-chained activity log. |
+| `tickets`, `exports` | Download tickets and prepared ZIP downloads. |
+| `outbox`, `jobs` | Deliveries and durable background jobs. |
+
+Every table also has `id`, `tenantId` (indexed) and `createdAt`; table definitions never declare them. Physical
+names are the prefix plus the name in snake case: `rooms` is `better_files_rooms`, `aclEntries` is
+`better_files_acl_entries`.
+
+## Fields of your own
+
+`schema` in the `betterFiles()` options customizes core tables:
+
+<TypeTable
+  type={{
+    tablePrefix: {
+      type: 'string',
+      description: 'Prefix of every physical table name: up to 24 lowercase letters, digits and underscores, starting with a letter, or an empty string.',
+      default: "'better_files_'",
+    },
+    '[table].additionalFields': {
+      type: 'Record of string to FieldDefinition',
+      description: 'Typed fields added to a core table, such as rooms or documents.',
+    },
+    '[table].tableName': {
+      type: 'string',
+      description: 'A different physical name for a core table.',
+    },
+  }}
+/>
+
+Fields are built with `field`, exported by `better-files`:
+
+| Builder | Type in TypeScript | Stored as (PostgreSQL / SQLite) |
+| --- | --- | --- |
+| `field.string()` | `string` | `TEXT` |
+| `field.number()` | `number` | `DOUBLE PRECISION` / `REAL` |
+| `field.boolean()` | `boolean` | `BOOLEAN` / `INTEGER` |
+| `field.timestamp()` | `number` (epoch milliseconds) | `DOUBLE PRECISION` / `REAL` |
+| `field.json<T>()` | `T` | `JSONB` / `TEXT` |
+| `field.enum(values)` | one of `values` | `TEXT` |
+
+Each takes options:
+
+<TypeTable
+  type={{
+    required: { type: 'boolean', description: 'Pass false for an optional field. It also makes the TypeScript property optional.', default: 'true' },
+    unique: { type: 'boolean', description: 'Adds a unique index on the field.' },
+    indexed: { type: 'boolean', description: 'Adds an index on the field.' },
+    columnName: { type: 'string', description: 'The physical column name.', default: 'the field name in snake case' },
+  }}
+/>
+
+Field names start with a lowercase letter and use letters and digits only. A field that already exists on the
+table, from the core, a plugin or a second declaration, is a configuration error when `betterFiles()` builds the
+instance.
+
+### Writing and reading them
+
+Rooms take values for your fields through the API: `fields` on `rooms.create` and `rooms.update`. Values are checked
+against their declarations:
+
+- only fields you declared in `schema.rooms.additionalFields` are accepted, never core or plugin fields (an unknown
+  name is `INVALID_INPUT`);
+- each value must have the declared type (strings up to 10,000 characters, enum values from the list);
+- `rooms.create` needs every required field; `null` clears an optional one on `rooms.update`.
+
+Room views returned by the API include the fields. Fields on other core tables are stored and typed the same way, but
+the core API does not write them: set them from your own code or a plugin through the database adapter.
+
+`dr.$Infer` carries the record types with every added field, yours and your plugins': `Room`, `Node`, `Document`,
+`Version`, `Member`, `PermissionGroup` and `AclEntry`. It exists only for types:
+
+```ts
+type Room = typeof dr.$Infer.Room;
+```
+
+## Plugin tables
+
+A plugin may own tables (`schema`) and add fields to core tables (`extendSchema`). Both join the same schema, so
+`dr.initialize()` and `better-files generate` include them.
+
+```ts
+import { definePlugin, defineTable, field } from 'better-files';
+
+export const dealNotes = definePlugin({
+  id: 'deal-notes',
+  schema: {
+    dealNotes: defineTable({
+      fields: {
+        roomId: field.string(),
+        nodeId: field.string({ required: false }),
+        authorId: field.string(),
+        body: field.string(),
+      },
+      indexes: [{ fields: ['tenantId', 'roomId'] }],
+    }),
+  },
+  extendSchema: {
+    documents: { additionalFields: { reviewed: field.boolean({ required: false }) } },
+  },
+});
+```
+
+- `defineTable` keeps the field types, so `InferFields<typeof table.fields>` (from `better-files/core`) gives the
+  record type.
+- Code reads and writes the table by its logical name through the adapter: `context.db.findMany('dealNotes', ...)`.
+- Indexes may name any field of the table, the base fields included.
+- A table name used by the core or another plugin is a configuration error.
+- A plugin table with a `roomId` field is cleaned up when its room is deleted.
+
+Fields a plugin adds with `extendSchema` belong to the plugin: they appear in `dr.$Infer`, but `rooms.create` and
+`rooms.update` do not accept them in `fields`.
+
+## Creating the tables
+
+`dr.initialize()` hands the schema to the database adapter, which makes the database match it. The SQL adapters
+(PostgreSQL, SQLite, libSQL, PGlite, Prisma and Drizzle) all do the same:
+
+- creates tables that do not exist;
+- adds columns that are missing (added columns are nullable, since existing rows have no value);
+- creates missing indexes.
+
+It never drops or renames anything, so it is safe to run on every deploy, and it returns `{ applied }`: the tables
+it created or altered. Run it at deploy time or with the CLI:
+
+```sh
+npx better-files migrate
+```
+
+Run it again after adding a plugin or a field.
+
+## Your own migration tool
+
+When a migration tool owns your database, it would see Better Files' tables as drift. Generate them in its format
+instead and add them to your migrations:
+
+```sh
+npx better-files generate --format sql --out better-files.sql
+npx better-files generate --format prisma --out prisma/better-files.prisma
+npx better-files generate --format drizzle --dialect postgres --out src/db/better-files.ts
+```
+
+| Flag | Values | Default |
+| --- | --- | --- |
+| `--format` | `sql`, `prisma`, `drizzle` | `sql` |
+| `--dialect` | `postgres`, `sqlite` | `sqlite` when the database adapter is SQLite or libSQL, else `postgres` |
+| `--out` | a file | standard output |
+| `--config` | your config module | `better-files.config.{ts,mts,js,mjs}` |
+
+The output covers the core tables, every plugin's tables and every added field, as the loaded instance resolves
+them. The SQL uses `CREATE TABLE IF NOT EXISTS` and `CREATE INDEX IF NOT EXISTS`. Prisma models are meant to go into
+your `schema.prisma` so `prisma migrate` owns them; with Drizzle, export the tables from your schema, or keep
+drizzle-kit away from them with `tablesFilter: ['!better_files_*']`. Regenerate after upgrades and plugin changes.
+
+The same function is available in code:
+
+```ts
+import { generateSchema } from 'better-files/adapter-sql';
+
+const ddl = generateSchema(dr.schema, { format: 'sql', dialect: 'postgres' });
+```
+
+`dr.schema` is the resolved schema: every table with its physical name, source (`core` or a plugin id), fields and
+indexes. Once your migrations have created the tables, `dr.initialize()` finds nothing left to do.
+
+## Related
+
+- [Databases](/docs/operations/databases): adapters and how each one migrates.
+- [Prisma and Drizzle](/docs/operations/databases/prisma-and-drizzle)
+- [CLI](/docs/operations/cli): `migrate`, `generate` and the other commands.
+- [Plugins](/docs/plugins): what each plugin adds to the schema.

@@ -1,0 +1,73 @@
+---
+title: Release compatibility
+description: What each Better IAM release offers Better Files, how the integration detects it, and how to test against unreleased Better IAM changes.
+icon: Layers
+packages: ['@better-files/iam', 'better-iam']
+sources:
+  - packages/iam/src/index.ts
+  - packages/iam/package.json
+  - scripts/better-iam.mjs
+  - scripts/packed-smoke.mjs
+  - .github/workflows/ci.yml
+---
+
+Better Files supports `better-iam` from **0.2.0** up to, but not including, 0.3.0 (the peer dependency range
+`>=0.2.0 <0.3.0`). Releases differ in what they offer, so the integration checks the instance it is given instead of
+assuming:
+
+```ts
+import { betterIamFeatures } from 'better-files/iam';
+
+betterIamFeatures(iam);
+// npm 0.2.0 → { guests: false, memberInvitations: true, kms: true, audit: true, listAccessible: true }
+```
+
+| Feature | What Better Files uses it for | npm 0.2.0 | Better IAM `main` |
+| --- | --- | --- | --- |
+| `guests` | Inviting outsiders as sponsored, time-limited guests | no | yes |
+| `memberInvitations` | The fallback for outsiders (`externalInvites: 'members'`) | yes | yes |
+| `kms` | A key per room for file encryption | yes | yes |
+| `audit` | Security events in the audit chain | yes | yes |
+| `listAccessible` | Room lists in one query instead of a decision per room | yes | yes |
+
+Where a feature is missing, the integration falls back or says so: inviting an outsider reports `UNSUPPORTED` until
+you choose [`externalInvites: 'members'`](/docs/guides/better-iam/outsiders), and `systemPolicy(iam)` leaves out the
+guest actions that 0.2.0 does not know.
+
+## Installing
+
+```npm
+npm install better-files better-iam
+```
+
+With pnpm 10 or later, allow Better IAM's password hashing to build: `pnpm approve-builds`, or
+`allowBuilds: { argon2: true }` in `pnpm-workspace.yaml`.
+
+<Callout type="warn" title="better-iam 0.2.0 installs every framework">
+  The `better-iam` package depends on its Next.js, React, Vue, Svelte and NestJS bindings, whose framework peers are
+  required, so npm installs Next.js, React, Vue, Svelte, NestJS and sharp into every app that installs `better-iam`.
+  This comes from Better IAM's packaging, not Better Files: Better Files itself requires none of them. Better IAM
+  will mark those peers optional in a later release.
+</Callout>
+
+## Testing against unreleased Better IAM
+
+The Better Files repository develops against `better-iam` from npm. To try changes in a Better IAM checkout, build it,
+then switch the workspace to it and back:
+
+```sh
+node scripts/better-iam.mjs link ../better-iam
+pnpm install --no-frozen-lockfile
+node scripts/better-iam.mjs npm
+pnpm install
+```
+
+CI runs the suite against npm on every push, and again against Better IAM's `main` branch in a separate job. A
+packed smoke test (`pnpm smoke:packed`) installs the packed Better Files packages with npm into a clean app, with
+`better-iam` from the registry, and runs Better Files on Better IAM end to end, as a user would.
+
+## Related
+
+- [Outsiders](/docs/guides/better-iam/outsiders)
+- [Service account](/docs/guides/better-iam/service-account): `systemPolicy(iam)`.
+- [Changelog](/docs/reference/changelog)

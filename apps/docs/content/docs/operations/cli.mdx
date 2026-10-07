@@ -1,0 +1,227 @@
+---
+title: CLI
+description: Every better-files command, from migrate and maintain to reconcile, storage and sync, with its flags, config loading and exit codes.
+metaTitle: The better-files command line
+icon: SquareTerminal
+packages: ['@better-files/cli']
+sources:
+  - packages/cli/src/cli.ts
+  - packages/cli/src/bin.ts
+  - packages/cli/src/index.ts
+  - packages/cli/src/reconcile.ts
+  - packages/cli/src/mirror.ts
+  - packages/cli/README.md
+  - packages/better-files/package.json
+  - examples/express-better-iam/better-files.config.ts
+---
+
+Deploys and operators need a few things outside your app's code: create the tables, run maintenance, check that the
+secret, database, storage and keys work, and prove a room's activity log is intact. The `better-files` command does
+these against the same instance your app builds, loaded from a config file.
+
+```sh
+npx better-files migrate
+npx better-files doctor --tenant acme
+npx better-files maintain --every 300
+```
+
+The binary ships with the `better-files` package (and on its own as `@better-files/cli`).
+
+## Configuration
+
+Instance commands import a module that exports your `betterFiles()` instance. By default the CLI looks in the
+current folder for `better-files.config.ts`, `better-files.config.mts`, `better-files.config.js` or
+`better-files.config.mjs`, in that order. Pass `--config <file>` to use another module.
+
+```ts title="better-files.config.ts"
+// For the CLI: better-files migrate, better-files doctor --tenant acme, better-files maintain --every 300
+export { dr as default } from './better-files.js';
+```
+
+The module's default export is used first, then an export named `dr`, then one named `betterFiles`. Either may be
+the instance itself or a function (sync or async) that returns it. Anything without `api` and `initialize` is
+refused.
+
+<Callout type="info" title="TypeScript configs">
+  Node imports a `.ts` config itself from Node 22.18. On older versions, run the CLI through a loader such as `tsx`, or
+  point `--config` at compiled JavaScript.
+</Callout>
+
+## Instance commands
+
+### migrate
+
+```sh
+better-files migrate [--config <file>]
+```
+
+Creates or upgrades the Better Files tables, core and plugin ones, by calling `dr.initialize()`, then prints the
+migration result as JSON and closes the instance. Run it at deploy time, and again after adding a plugin that owns
+tables.
+
+### maintain
+
+```sh
+better-files maintain [--every <seconds>] [--config <file>]
+```
+
+Runs [`dr.maintain()`](/docs/operations/maintenance-and-jobs) and prints a timestamped JSON line with the result.
+Without `--every` it runs once and exits. With `--every` it runs at once and then on that interval until the process
+is stopped; a failed run is printed to stderr and the next one still happens. `--every` takes at least 10 seconds.
+
+### verify
+
+```sh
+better-files verify --tenant <id> --room <id> [--config <file>]
+```
+
+Recomputes a room's activity hash chain (`dr.verifyActivity`) and prints `{ valid, records, head?, brokenAt? }`.
+It exits 0 when the chain is intact and 2 when it is broken; `brokenAt` is the sequence number where it breaks. See
+[the activity log](/docs/guides/concepts/activity-log).
+
+### doctor
+
+```sh
+better-files doctor [--tenant <id>] [--config <file>]
+```
+
+Checks the deployment and prints one line per check:
+
+| Check | What it does |
+| --- | --- |
+| `secret` | Fails when `secret` is shorter than 32 characters. |
+| `plugins` | Lists the registered plugin ids. |
+| `database` | Reads the `rooms` table; a failure suggests running `migrate`. |
+| `storage` | Writes, reads back and deletes a small object under `__doctor__/`. |
+| `encryption` | Reports when files are stored unencrypted. With `--tenant`, generates and unwraps a data key through the key provider. |
+
+It ends with "All checks passed" and exit 0, or the number of problems and exit 1.
+
+### reconcile
+
+```sh
+better-files reconcile --tenant <id> [--room <id>] [--repair] [--revoke-orphans] [--json] [--config <file>]
+```
+
+Better Files writes room relations and group memberships to the identity system and to its own rosters one after the
+other, not in one transaction. A crash in between, a failed call, or an edit made directly in Better IAM leaves them
+apart. `reconcile` compares the two for every room of the tenant (or one room with `--room`):
+
+| Kind | Meaning | With `--repair` |
+| --- | --- | --- |
+| `missing-relation` | A member or permission group should hold a room relation; the identity system has none. | Grants it and records its id. |
+| `stale-relation-id` | The relation exists under another id than the roster recorded. | Records the right id. |
+| `lingering-relation` | A suspended, removed or expired member still holds a relation on the room. | Revokes it. |
+| `missing-group-membership` | An active member is missing from a permission group's identity-system group. | Adds them, with their expiry. |
+| `lingering-group-membership` | A former member is still in a permission group's identity-system group. | Removes them. |
+| `orphan-relation` | A relation on the room that no roster entry explains. | Revokes it only with `--revoke-orphans`. |
+| `unregistered-room` | The room is not a registered resource in the identity system. | Reported only. |
+| `stuck-provisioning` | Room creation stopped before the identity system knew the room (over an hour ago). | Reported only. |
+
+Relations granted directly in Better IAM are treated as intentional and only reported, unless you pass
+`--revoke-orphans`. The command needs an identity integration with a directory, and reads and writes through the
+integration's own credential (Better IAM's `systemCredential`). Run it in a quiet period: an invitation or role change
+that lands between the two reads shows up as a difference.
+
+Output is one line per difference (`✓` repaired, `✗` repair failed, `!` reported) and a summary, or the full report
+with `--json`. It exits 0 when there are no differences or all were repaired, and 2 otherwise.
+
+The same check is available in code:
+
+```ts
+import { reconcileIam } from 'better-files/cli';
+
+const report = await reconcileIam(dr, { tenantId: 'acme', repair: true });
+// { tenantId, rooms, drift: [{ kind, roomId, message, … }], repaired, failed }
+```
+
+### openapi
+
+```sh
+better-files openapi [--out <file>] [--config <file>]
+```
+
+Writes the OpenAPI 3.1 document for the mounted protocol, plugin operations included (`dr.openapi()`), to stdout or
+to `--out`.
+
+### generate
+
+```sh
+better-files generate [--format sql|prisma|drizzle] [--dialect postgres|sqlite] [--out <file>] [--config <file>]
+```
+
+Prints the Better Files tables (core, plugins and your additional fields) for your own migration tool. `--format`
+defaults to `sql`. `--dialect` defaults to `sqlite` when the database adapter's id mentions SQLite or libSQL, and to
+`postgres` otherwise. With `--out` the text goes to that file. See
+[Prisma and Drizzle](/docs/operations/databases/prisma-and-drizzle).
+
+## Storage cluster commands
+
+These talk to a running app over HTTP, as an administrator of the operator tenant, and need the
+[storage cluster](/docs/operations/storage/cluster) configured there.
+
+```sh
+better-files storage nodes | status | reconcile | sync
+better-files storage join-token [--zone <zone>]
+better-files storage drain | activate | cordon | uncordon --node <id>
+better-files storage remove --node <id> [--force]
+```
+
+| Subcommand | What it does |
+| --- | --- |
+| `nodes` | Lists storage nodes: id, name, zone, state, connectivity, used and total space, object count. |
+| `status` | Prints the cluster status as JSON. |
+| `join-token` | Prints a single-use token for a new node (give it to the node as `BETTER_FILES_JOIN_TOKEN`); `--zone` sets its zone. |
+| `drain`, `activate`, `cordon`, `uncordon` | Changes one node's state. |
+| `remove` | Removes a node; `--force` is passed through to the server. |
+| `reconcile`, `sync` | Runs the cluster's reconcile or sync and prints the result. |
+
+They need `--url` and `--tenant`, and usually `--token` (see the shared options below).
+
+## Sync commands
+
+Mirror one room into a local folder through the [sync plugin](/docs/plugins/sync)'s changes feed.
+
+```sh
+export BETTER_FILES_URL=https://app.example.com/api/better-files BETTER_FILES_TENANT=acme BETTER_FILES_TOKEN=…
+better-files sync pull   --room <id> --dir ./falcon
+better-files sync status --room <id> --dir ./falcon
+better-files sync push   --room <id> --dir ./falcon [--delete]
+```
+
+- `pull` downloads remote changes. Remote renames and moves become local renames. Local edits are never overwritten:
+  when both sides changed, your file is kept as `name (conflicted copy …).ext`.
+- `push` pulls first, then uploads new and edited files. Local deletions reach the server only with `--delete`.
+- `status` lists local additions (`+`), edits (`M`) and deletions (`-`), and the number of pending remote changes.
+- Documents you may view but not download are listed as view only and skipped.
+- State lives in `<dir>/.better-files/state.json`. The token is not written to disk.
+
+### Shared options for HTTP commands
+
+| Flag | Environment variable | Meaning |
+| --- | --- | --- |
+| `--url <url>` | `BETTER_FILES_URL` | The protocol URL, such as `https://app.example.com/api/better-files`. |
+| `--token <token>` | `BETTER_FILES_TOKEN` | Sent as `Authorization: Bearer`. |
+| `--tenant <id>` | `BETTER_FILES_TENANT` | The tenant (the operator tenant for `storage`). |
+| `--room <id>` | none | The room to mirror (`sync` only, required). |
+| `--dir <path>` | none | The local folder (`sync` only); default the current folder. |
+
+## Exit codes
+
+| Code | When |
+| --- | --- |
+| `0` | Success. Also `better-files help` and `--help` (`-h`). |
+| `1` | An error (printed to stderr, prefixed with its code when it has one), an unknown command, no command at all, or `doctor` found problems. |
+| `2` | `verify` found a broken chain, or `reconcile` left differences. |
+
+## Embedding
+
+`better-files/cli` exports `main(argv, io)` (runs one command and resolves with its exit code), `loadInstance(cwd,
+path?)`, `reconcileIam` and `createMirror`, for building the same commands into your own tools.
+
+## Related
+
+- [Maintenance and jobs](/docs/operations/maintenance-and-jobs)
+- [Deployment](/docs/operations/deployment)
+- [Databases](/docs/operations/databases)
+- [Better IAM integration](/docs/guides/better-iam)

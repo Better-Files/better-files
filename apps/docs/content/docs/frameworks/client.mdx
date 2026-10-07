@@ -1,0 +1,157 @@
+---
+title: Typed client
+metaTitle: Better Files typed client
+description: A browser-safe client typed from your server instance, with resumable parallel uploads, direct-to-storage uploads, file links and live room activity.
+icon: Globe
+packages:
+  - '@better-files/client'
+sources:
+  - packages/client/src/index.ts
+  - packages/client/src/direct.ts
+  - packages/client/src/live.ts
+  - packages/client/src/cache.ts
+  - packages/server/src/http.ts
+---
+
+`better-files/client` calls the [protocol](/docs/frameworks#the-protocol) your server mounts. It imports no server
+code: its types come from `typeof dr` through a type-only import, so every core operation, every plugin endpoint and
+your own schema fields are typed in the browser.
+
+```npm
+npm i better-files
+```
+
+## Create a client
+
+```ts title="lib/files-client.ts"
+import { createBetterFilesClient } from 'better-files/client';
+import type { dr } from '@/server/better-files'; // type only: no server code in the bundle
+
+export const files = createBetterFilesClient<typeof dr>({
+  tenantId: () => currentSession()?.tenantId,
+});
+
+const rooms = await files.rooms.list({});
+const room = await files.rooms.create({ name: 'Project Falcon' });
+await files.qa.ask({ roomId: room.id, subject: 'Lease', text: 'Is the lease assignable?' }); // qaPlugin
+```
+
+Each `dr.api.group.method(credential, input)` on the server becomes `files.group.method(input, options?)`. The client
+fills in `tenantId` from its option unless the input has one.
+
+| Option              | Default             | What it does                                                                           |
+| ------------------- | ------------------- | -------------------------------------------------------------------------------------- |
+| `baseURL`           | the page's origin   | Origin of the app serving the protocol. Required outside the browser.                 |
+| `basePath`          | `/api/better-files` | Must match `basePath` on `betterFiles()`.                                              |
+| `tenantId`          | (none)              | A string or a function, sent with every call that has no `tenantId`.                 |
+| `headers`           | (none)              | Extra headers per request, sync or async: a bearer token for server-to-server calls. |
+| `credentials`       | `include`           | So Better IAM session cookies travel with the calls.                                   |
+| `fetch`             | `globalThis.fetch`  | A custom fetch (tests, instrumentation).                                               |
+| `onUnauthenticated` | (none)              | Called on 401, when the session lapsed or was revoked: redirect to sign-in.            |
+| `requestId`         | `false`             | Sends an `X-Request-Id` with each call. Errors echo it, which helps support tickets.   |
+
+Every call sends `X-Better-Files: 1`. The server refuses protocol calls without it, and refuses cookie-carrying calls
+from origins that are not the page's own or listed in `trustedOrigins`.
+
+Per call, pass `{ signal, headers }` as the second argument. To call an operation by path, use
+`files.$request('qa/ask', input)`.
+
+## Errors
+
+A refused call throws `BetterFilesClientError` with `code` (`FORBIDDEN`, `NOT_FOUND`, `QUOTA_EXCEEDED`, …), `status`,
+`message`, and, when present, `requestId` and `details`.
+
+```ts
+import { BetterFilesClientError } from 'better-files/client';
+
+try {
+  await files.documents.rename({ nodeId, name });
+} catch (error) {
+  if (error instanceof BetterFilesClientError && error.code === 'CONFLICT') showNameTaken();
+  else throw error;
+}
+```
+
+## Uploads
+
+```ts
+const { document, version } = await files.upload({
+  parentId: folderId, // a new document in this folder…
+  // documentId,      // …or a new version of this document
+  file, // a File, Blob or Uint8Array
+  onProgress: ({ loaded, total, ratio }) => setProgress(ratio),
+});
+```
+
+The client opens an upload session, sends the file in one request or in parts, and completes the session. Large
+files go up in parallel parts (`concurrency`, default 3). Each part is retried on network errors, 429 and 5xx
+(`retries`, default 3) with exponential backoff. If the upload fails or `signal` aborts it, the client aborts the
+session so no partial file stays behind. `filename` and `mimeType` default to the `File`'s own, and `comment` is
+stored with the version.
+
+### Direct uploads
+
+On serverless hosts with request-size limits, or for very large files, pass `direct: true`:
+
+```ts
+await files.upload({ parentId: folderId, file, direct: true });
+```
+
+The browser encrypts each part with the session's key material, in the same segment format the server uses, and
+`PUT`s it straight to S3-compatible storage through presigned URLs. Your server never sees the bytes. When the upload
+completes, the server reads the object back and accepts it only if every segment decrypts.
+
+Direct uploads need a storage adapter with presigned parts (S3, R2, MinIO, GCS, Azure). The bucket's CORS rules must
+allow `PUT` from your origin and expose the `ETag` header.
+
+## Downloads and viewing
+
+Downloads and views go through short-lived, use-limited tickets. Ask for one, then open the URL:
+
+```ts
+const ticket = await files.documents.requestDownload({ nodeId }); // a copy watermarked for this person
+window.location.assign(files.fileUrl(ticket.url));
+```
+
+- `documents.requestDownload` serves a watermarked copy, and `documents.requestOriginal` the original. Each needs the
+  matching capability (`DOWNLOAD_WATERMARKED` or `DOWNLOAD_ORIGINAL`).
+- `documents.requestView` issues a ticket for the viewer. Use it with the `<bf-viewer>` element from
+  `better-files/viewer`, which shows server-rendered, watermarked pages so the file never reaches the browser.
+- Each takes an optional `versionId` and `disposition` (`attachment` or `inline`).
+- `folders.requestDownload({ nodeId, variant? })` returns a ticket for a ZIP of everything in the folder the person
+  may take, watermarked for them unless `variant: 'original'`.
+
+`fileUrl` turns the ticket path into an absolute URL on the client's `baseURL` and `basePath`.
+
+## Live room activity
+
+```ts
+const subscription = files.subscribe(roomId, {
+  onActivity: (activity) => console.log(activity.sequence, activity.action, activity.nodeId),
+  onRevoked: () => showAccessEnded(),
+});
+// later
+subscription.close();
+```
+
+The stream is Server-Sent Events read with `fetch`, so bearer tokens work too. It reconnects on its own and resumes
+after the last entry it received (`after` starts from a given sequence). Each person receives only entries about what
+they may list. When their access to the room ends, `onRevoked` runs and the subscription stops.
+
+## Query cache
+
+The UI bindings share a small cache that you can also use on its own. It is exported as `QueryCache`,
+`standardQueries`, `runQuery` and `uploadInvalidations`. Cache keys use prefixes that writes invalidate:
+
+| Key                       | Read                    |
+| ------------------------- | ----------------------- |
+| `rooms:{status}`          | `rooms.list`            |
+| `room:{roomId}`           | `rooms.get`             |
+| `index:{roomId}`          | `rooms.index`           |
+| `folder:{nodeId}`         | `folders.list`          |
+| `document:{nodeId}`       | `documents.get`         |
+| `members:{roomId}`        | `members.list`          |
+| `activity:{roomId}:…`     | `activity.list`         |
+| `caps:{roomId}:{nodeIds}` | `permissions.capabilities` |
+
+`OperationResult<typeof dr, 'rooms', 'index'>` gives the output type of any operation.

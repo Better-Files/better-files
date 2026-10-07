@@ -1,0 +1,51 @@
+---
+title: Hono
+metaTitle: Better Files for Hono
+description: A protocol handler, a middleware that puts the bound API on the context, and a route guard, for Hono on Node, Bun and Deno.
+icon: Hono
+packages:
+  - '@better-files/middleware'
+sources:
+  - packages/middleware/src/hono.ts
+  - packages/middleware/src/index.ts
+  - docs/guides/frameworks/hono.md
+---
+
+`better-files/middleware/hono` works with any Hono version, on Node (`@hono/node-server`), Bun and Deno. It types
+only the slice of Hono's context it uses.
+
+```ts title="src/index.ts"
+import { Hono } from 'hono';
+import { createBetterFilesHono, type HonoBetterFiles } from 'better-files/middleware/hono';
+import { dr } from './better-files';
+
+const files = createBetterFilesHono(dr);
+const app = new Hono<{ Variables: { betterFiles: HonoBetterFiles<typeof dr> } }>();
+
+app.all(`${files.basePath}/*`, files.handler); // the protocol
+app.use('*', files.middleware); // c.get('betterFiles') everywhere else
+
+app.get('/deals/:tenantId/:roomId/documents/:nodeId', files.requireCapability(['VIEW']), async (c) => {
+  const { api } = c.get('betterFiles');
+  return c.json(
+    await api.documents.get({ tenantId: c.req.param('tenantId'), nodeId: c.req.param('nodeId') }),
+  );
+});
+
+export default app;
+```
+
+| Piece                                    | What it does                                                                                                     |
+| ---------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| `handler`                                | Passes the raw `Request` to `dr.handler`. Register it before any middleware that reads the body.                |
+| `middleware`                             | Sets `betterFiles` (`{ credential, api }`) on the context.                                                       |
+| `requireCapability(capabilities, select?)` | Checks one node. Reads `tenantId`, `roomId` and `nodeId` from route params unless you pass selectors. A refusal returns the protocol's JSON error and status. |
+| `basePath`                               | The instance's base path, for mounting the handler.                                                              |
+
+Selectors read from anywhere on the context, for example
+`files.requireCapability(['VIEW'], { tenantId: (c) => c.get('session').tenantId })`.
+
+## Client address
+
+On `@hono/node-server`, the handler passes the socket's address to Better Files. On Bun, Deno and edge runtimes, have
+your proxy put the client address in `X-Forwarded-For` and set `trustProxy: true` on `betterFiles()`.

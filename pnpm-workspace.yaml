@@ -1,0 +1,20 @@
+packages:
+  - packages/*
+  - examples/*
+  - apps/*
+
+# Optional peers (framework bindings, native tools) are listed as devDependencies where tests need
+# them; the rest are never fetched.
+autoInstallPeers: false
+
+overrides:
+  # mdast-util-to-markdown 2.2.0 makes Fumadocs 16.15's processed-markdown stringifier recurse forever on bold
+  # text (apps/docs build: "Maximum call stack size exceeded"). Better IAM's docs resolve 2.1.2.
+  mdast-util-to-markdown: 2.1.2
+
+allowBuilds:
+  # Password hashing in better-iam (@better-iam/auth)
+  argon2: true
+  better-sqlite3: true
+  esbuild: true
+  sharp: true

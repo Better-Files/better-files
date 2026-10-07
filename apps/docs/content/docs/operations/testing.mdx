@@ -1,0 +1,270 @@
+---
+title: Testing
+description: Test apps that embed Better Files with an in-memory database and storage, a fake identity system, seeded rooms, and the adapter conformance cases.
+metaTitle: Testing apps that use Better Files
+icon: ClipboardCheck
+packages: ['@better-files/testing', '@better-files/core']
+sources:
+  - packages/testing/src/index.ts
+  - packages/testing/src/fake-iam.ts
+  - packages/testing/src/memory-database.ts
+  - packages/testing/src/memory-storage.ts
+  - packages/testing/src/seed.ts
+  - packages/core/src/conformance.ts
+  - packages/better-files/package.json
+  - tests/fixtures.ts
+  - tests/server/better-files.test.ts
+  - tests/server/files.test.ts
+  - tests/server/jobs.test.ts
+  - tests/conformance/memory-database.test.ts
+  - tests/conformance/sql-databases.test.ts
+  - tests/conformance/s3-storage.test.ts
+---
+
+Tests of an app that embeds Better Files should not need PostgreSQL, a bucket, or a running Better IAM. They should
+still go through the real permission checks, encryption and uploads, so a test that passes means the feature works.
+
+`better-files/testing` gives you the pieces to build a real `betterFiles()` instance in memory: a database, a
+storage adapter, and a fake identity system whose decisions you control. Only the identity system is fake; everything
+else is the production code.
+
+```ts
+import { betterFiles, localKeyProvider } from 'better-files';
+import { fakeIam, memoryDatabase, memoryStorage } from 'better-files/testing';
+
+const SECRET = 'a-test-secret-with-more-than-32-characters';
+
+const dr = betterFiles({
+  iam: fakeIam({ principals: { alice: { id: 'alice', tenantId: 't1', email: 'alice@acme.test' } } }),
+  database: memoryDatabase(),
+  storage: memoryStorage(),
+  secret: SECRET,
+  encryption: { keys: localKeyProvider({ secret: SECRET }) },
+  logger: { warn() {}, error() {} },
+});
+await dr.initialize();
+
+await dr.api.rooms.create({ token: 'alice' }, { tenantId: 't1', name: 'Project Falcon' });
+```
+
+## What better-files/testing exports
+
+| Export | What it is |
+| --- | --- |
+| `memoryDatabase()` | A `DatabaseAdapter` kept in memory, with transactions. It passes the same conformance cases as the SQL adapters. |
+| `memoryStorage()` | A `StorageAdapter` with multipart uploads. `storage.objects` exposes what was stored; presigned part URLs (`memory://parts/…`) are answered by `storage.fetch`, standing in for the bucket a browser would upload to. |
+| `readAll(source)` | Reads a byte stream into one `Uint8Array`. |
+| `fakeIam(options)` | A stand-in identity integration: bearer tokens map to principals, decisions come from your function, and an in-memory directory records rooms, relations, groups and invitations. |
+| `relationDecider(model, options?)` | A decision function for `fakeIam` that follows the Better Files access model. |
+| `seedRoom(db, input)` | Writes a room, its folder tree and permission entries straight to the database. |
+
+### fakeIam
+
+```ts
+const iam = fakeIam({
+  principals: {
+    alice: { id: 'alice', tenantId: 't1', name: 'Alice Owner', email: 'alice@acme.test' },
+    dave: { id: 'dave', tenantId: 't1', email: 'dave@outside.test', guest: true },
+  },
+  decide: (principal, check, state) => check.action !== 'better-files:rooms:delete',
+});
+```
+
+- `principals` are keyed by bearer token. A credential `{ token: 'alice' }`, or an `Authorization: Bearer alice`
+  header, authenticates as that principal. An unknown token is `UNAUTHENTICATED`; a principal used with another
+  tenant is `FORBIDDEN`.
+- Each principal needs `id` and `tenantId`. `groups`, `guest`, `mfa` and `kind` are optional (`[]`, `false`, `false`,
+  `'user'`). Group memberships added through the directory show up in `principal.groups`, as with Better IAM.
+- `decide(principal, check, state)` makes the identity-system decision (layer B). Without it every check is allowed,
+  so your test exercises the permission matrix alone. A check across tenants is always refused.
+- `iam.checks` lists every layer B check in order, with `principalId`, for assertions.
+- `iam.state` is the directory: `rooms`, `relationships`, `groups`, `invitations`, `audit` (security events Better
+  Files recorded) and `relationsOf(principal, roomId)`.
+
+### relationDecider
+
+`relationDecider(model, { tenantActions?, roomOf? })` decides like Better Files' access model: a room relation the
+principal holds, directly or through a group, grants the actions the model lists for it. `tenantActions(principal)`
+answers checks on the tenant (`'*'` allows every one), and `roomOf(type, id)` maps a folder or document to its room. Pass
+`coreAccessModel` plus your plugins' `accessModel` entries.
+
+### seedRoom
+
+`seedRoom` skips the room services, so it needs no directory. Use it to test access resolution on a tree you
+describe. Pass the same `database` the instance uses:
+
+```ts
+// fakeIam principals: { alice: { id: 'alice', tenantId: 't1', groups: ['buyers'] } }
+const seeded = await seedRoom(database, {
+  tenantId: 't1',
+  tree: [{ name: 'finance', children: [{ name: 'model.xlsx' }, { name: 'secret.pdf' }] }],
+});
+await seeded.grant('root', { type: 'group', id: 'buyers' }, dr.capabilities.preset('view'));
+await seeded.grant('secret.pdf', { type: 'group', id: 'buyers' }, dr.capabilities.preset('hidden'));
+
+const held = await dr.capabilitiesFor({ token: 'alice' }, {
+  tenantId: 't1',
+  roomId: seeded.room.id,
+  nodeIds: [seeded.nodes['model.xlsx']!, seeded.nodes['secret.pdf']!],
+});
+```
+
+A node with `children` is a folder, one without is a document (or set `kind`). `seeded.nodes` maps each name to its
+id, and the root folder is `root`, so names must be unique within the seed.
+`grant(nodeName, subject, mask, options?)` adds one permission-matrix entry; `options` takes `locked` and
+`expiresAt`. Other optional inputs: `ownerId`, `status` (default `live`), `settings` and `now`.
+
+## A complete test
+
+This test, written for Vitest, builds an instance with the access model, uploads a document, and checks what an
+outsider sees and how tickets expire. It is modeled on the fixture Better Files' own tests use.
+
+```ts title="tests/data-room.test.ts"
+import { describe, expect, it } from 'vitest';
+import { betterFiles, coreAccessModel, localKeyProvider } from 'better-files';
+import { fakeIam, memoryDatabase, memoryStorage, relationDecider } from 'better-files/testing';
+
+const TENANT = 't1';
+const SECRET = 'a-test-secret-with-more-than-32-characters';
+
+async function setup() {
+  const clock = { current: Date.UTC(2026, 0, 15, 12) };
+  let dr: ReturnType<typeof make>;
+  const iam = fakeIam({
+    principals: {
+      alice: { id: 'alice', tenantId: TENANT, name: 'Alice Owner', email: 'alice@acme.test' },
+      bob: { id: 'bob', tenantId: TENANT, name: 'Bob Buyer', email: 'bob@acme.test' },
+    },
+    decide: relationDecider(coreAccessModel, {
+      // Alice administers the tenant; everyone may list their rooms.
+      tenantActions: (principal) => (principal.id === 'alice' ? ['*'] : ['better-files:rooms:read']),
+      roomOf: async (type, id) =>
+        (await dr.resolveForIam({ tenantId: TENANT, type, id }).catch(() => undefined))
+          ?.attributes.roomId as string | undefined,
+    }),
+  });
+  const storage = memoryStorage();
+  const make = () =>
+    betterFiles({
+      iam,
+      database: memoryDatabase(),
+      storage,
+      secret: SECRET,
+      encryption: { keys: localKeyProvider({ secret: SECRET }) },
+      clock: { now: () => clock.current },
+      logger: { warn() {}, error() {} },
+      jobs: { runner: 'deferred' }, // jobs run only when the test calls dr.jobs.work()
+    });
+  dr = make();
+  await dr.initialize();
+  return { dr, iam, storage, clock };
+}
+
+const as = (token: string) => ({ token });
+
+describe('deal room', () => {
+  it('keeps documents from people outside the room', async () => {
+    const { dr, storage, clock } = await setup();
+    const room = await dr.api.rooms.create(as('alice'), { tenantId: TENANT, name: 'Project Falcon' });
+
+    const content = new TextEncoder().encode('Q3 revenue: 4.2m');
+    const session = await dr.api.uploads.create(as('alice'), {
+      tenantId: TENANT,
+      parentId: room.rootNodeId,
+      filename: 'figures.txt',
+      size: content.byteLength,
+    });
+    await dr.files.upload(as('alice'), { tenantId: TENANT, uploadId: session.uploadId, body: content });
+    const { document } = await dr.api.uploads.complete(as('alice'), {
+      tenantId: TENANT,
+      uploadId: session.uploadId,
+    });
+
+    // Stored encrypted.
+    const [stored] = [...storage.objects.values()];
+    expect(Buffer.from(stored!).includes(Buffer.from('revenue'))).toBe(false);
+
+    // Bob is not a member: the document does not exist for him.
+    await expect(
+      dr.api.documents.get(as('bob'), { tenantId: TENANT, nodeId: document.id }),
+    ).rejects.toMatchObject({ code: 'NOT_FOUND' });
+
+    // Tickets are short-lived.
+    const ticket = await dr.api.documents.requestOriginal(as('alice'), {
+      tenantId: TENANT,
+      nodeId: document.id,
+    });
+    const token = ticket.url.split('/files/')[1]!;
+    expect((await dr.files.serve(token)).status).toBe(200);
+    clock.current += 5 * 60_000;
+    expect((await dr.files.serve(token)).status).toBe(404);
+
+    expect(await dr.maintain()).toMatchObject({ tickets: 1 });
+    await dr.jobs.work();
+  });
+});
+```
+
+Things that make tests like this reliable:
+
+- **A controlled clock.** `clock: { now }` drives expiry, tickets, scheduled closes and job timing. Move it forward and
+  call `dr.maintain()` to test what happens later.
+- **Deterministic jobs.** With `jobs: { runner: 'deferred' }`, jobs wait until you call `dr.jobs.work()`. With the
+  default inline runner, `await dr.jobs.drain()` waits until every job this process started has finished.
+- **Uploads without HTTP.** `dr.files.upload` takes the body directly. For a file larger than `limits.partSize`, the
+  session is multipart: upload each part with `part: n`. A small `limits.partSize` (a multiple of 64 KiB) makes
+  multipart paths cheap to test.
+- **Downloads without HTTP.** `dr.files.serve(token, { range? })` returns the `Response` a browser would get.
+- **The HTTP layer.** To test the protocol itself, call `dr.handler(new Request(…))` with the `x-better-files: 1`
+  header.
+
+## Conformance cases
+
+If you write your own database or storage adapter, run the conformance cases from `better-files/core/conformance`.
+They describe the behavior every adapter must share, independently of any test framework:
+
+| Export | What it is |
+| --- | --- |
+| `databaseConformanceCases()` | Cases for a `DatabaseAdapter`. Each expects a fresh adapter on which `migrate(conformanceSchema)` has run. |
+| `conformanceSchema` | The small schema those cases use (a `widgets` table, prefixed `conf_`). |
+| `storageConformanceCases()` | Cases for a `StorageAdapter`. Each expects an empty store. |
+
+Each case is `{ name, run(adapter) }` and throws when the adapter behaves differently.
+
+```ts title="tests/my-adapter.conformance.test.ts"
+import { describe, it } from 'vitest';
+import {
+  conformanceSchema,
+  databaseConformanceCases,
+  storageConformanceCases,
+} from 'better-files/core/conformance';
+import { myDatabase, myStorage } from '../src/adapters';
+
+describe('my database adapter', () => {
+  for (const testCase of databaseConformanceCases())
+    it(testCase.name, async () => {
+      const db = myDatabase();
+      try {
+        await db.migrate(conformanceSchema);
+        await testCase.run(db);
+      } finally {
+        await db.close?.();
+      }
+    });
+});
+
+describe('my storage adapter', () => {
+  for (const testCase of storageConformanceCases())
+    it(testCase.name, () => testCase.run(myStorage()));
+});
+```
+
+The first-party adapters run these same cases: the in-memory database, SQLite, libSQL, PGlite and PostgreSQL, the ORM
+adapters, and S3-compatible storage.
+
+## Related
+
+- [Databases](/docs/operations/databases)
+- [Storage](/docs/operations/storage)
+- [Maintenance and jobs](/docs/operations/maintenance-and-jobs)
+- [Permissions](/docs/guides/concepts/permissions)

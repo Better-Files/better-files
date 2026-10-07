@@ -1,0 +1,7 @@
+{
+  "title": "Reference",
+  "description": "Operations, actions, capabilities, errors, packages, and changelog",
+  "root": true,
+  "icon": "Code",
+  "pages": ["index", "operations", "actions", "capabilities", "errors", "packages", "changelog"]
+}

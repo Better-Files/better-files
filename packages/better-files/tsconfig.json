@@ -1,0 +1,178 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": "src",
+    "outDir": "dist"
+  },
+  "include": ["src/**/*.ts"],
+  "references": [
+    {
+      "path": "../adapter-drizzle"
+    },
+    {
+      "path": "../adapter-libsql"
+    },
+    {
+      "path": "../adapter-pglite"
+    },
+    {
+      "path": "../adapter-postgres"
+    },
+    {
+      "path": "../adapter-prisma"
+    },
+    {
+      "path": "../adapter-sql"
+    },
+    {
+      "path": "../adapter-sqlite"
+    },
+    {
+      "path": "../cli"
+    },
+    {
+      "path": "../client"
+    },
+    {
+      "path": "../core"
+    },
+    {
+      "path": "../crypto"
+    },
+    {
+      "path": "../iam"
+    },
+    {
+      "path": "../jobs"
+    },
+    {
+      "path": "../kms"
+    },
+    {
+      "path": "../mcp"
+    },
+    {
+      "path": "../middleware"
+    },
+    {
+      "path": "../nestjs"
+    },
+    {
+      "path": "../next"
+    },
+    {
+      "path": "../plugin-ai"
+    },
+    {
+      "path": "../plugin-analytics"
+    },
+    {
+      "path": "../plugin-annotations"
+    },
+    {
+      "path": "../plugin-audit"
+    },
+    {
+      "path": "../plugin-connectors"
+    },
+    {
+      "path": "../plugin-esign"
+    },
+    {
+      "path": "../plugin-guard"
+    },
+    {
+      "path": "../plugin-inbound"
+    },
+    {
+      "path": "../plugin-links"
+    },
+    {
+      "path": "../plugin-nda"
+    },
+    {
+      "path": "../plugin-network"
+    },
+    {
+      "path": "../plugin-notifications"
+    },
+    {
+      "path": "../plugin-processing"
+    },
+    {
+      "path": "../plugin-qa"
+    },
+    {
+      "path": "../plugin-quotas"
+    },
+    {
+      "path": "../plugin-redaction"
+    },
+    {
+      "path": "../plugin-retention"
+    },
+    {
+      "path": "../plugin-reviews"
+    },
+    {
+      "path": "../plugin-scan"
+    },
+    {
+      "path": "../plugin-search"
+    },
+    {
+      "path": "../plugin-sync"
+    },
+    {
+      "path": "../plugin-tasks"
+    },
+    {
+      "path": "../plugin-templates"
+    },
+    {
+      "path": "../plugin-watermark"
+    },
+    {
+      "path": "../plugin-webhooks"
+    },
+    {
+      "path": "../react"
+    },
+    {
+      "path": "../server"
+    },
+    {
+      "path": "../storage-azure"
+    },
+    {
+      "path": "../storage-cluster"
+    },
+    {
+      "path": "../storage-fs"
+    },
+    {
+      "path": "../storage-gcs"
+    },
+    {
+      "path": "../storage-node"
+    },
+    {
+      "path": "../storage-regional"
+    },
+    {
+      "path": "../storage-s3"
+    },
+    {
+      "path": "../svelte"
+    },
+    {
+      "path": "../testing"
+    },
+    {
+      "path": "../viewer"
+    },
+    {
+      "path": "../vue"
+    }
+  ]
+}

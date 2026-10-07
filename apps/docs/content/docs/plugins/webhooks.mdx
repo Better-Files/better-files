@@ -1,0 +1,284 @@
+---
+title: Webhooks
+description: Signed HTTPS callbacks for Better Files events, delivered through an outbox with retries and protected against requests into your own network.
+metaTitle: Signed webhooks for data room events
+icon: Webhook
+packages: ['@better-files/plugin-webhooks']
+sources:
+  - packages/plugin-webhooks/src/index.ts
+  - packages/plugin-webhooks/src/network.ts
+  - packages/plugin-webhooks/src/match.ts
+  - packages/plugin-webhooks/README.md
+  - packages/core/src/plugin.ts
+  - packages/server/src/index.ts
+  - packages/server/src/pipeline.ts
+  - tests/plugins/webhooks.test.ts
+  - tests/plugins/webhooks-security.test.ts
+---
+
+Other systems often need to know what happens in a room: a CRM updates a deal when a buyer is invited, a compliance
+tool archives each new document, a chat channel hears about every upload. A webhook is an HTTP request your
+application sends to their URL when an event happens.
+
+The webhooks plugin lets each tenant subscribe HTTPS endpoints to event patterns, optionally for one room. Deliveries
+are written to an outbox table in the same database, retried with backoff, signed with a secret so the receiver can
+check they came from you, and refused for addresses inside your own network.
+
+```ts
+import { betterFiles } from 'better-files';
+import { betterFilesIamPlugin } from 'better-files/iam';
+import { webhooksPlugin } from 'better-files/plugin-webhooks';
+
+const plugins = [webhooksPlugin()] as const;
+const iamPlugin = betterFilesIamPlugin({ plugins }); // registers better-files:webhooks:manage
+
+export const dr = betterFiles({ /* iam, database, storage, secret */ plugins });
+
+const hook = await dr.api.webhooks.create(credential, {
+  tenantId,
+  url: 'https://hooks.example.com/better-files',
+  events: ['document.*', 'room.created'],
+});
+// hook.secret ('whsec_…') is returned only now: store it in the receiving application.
+```
+
+The plugin owns two tables, `webhooks` and `webhookDeliveries`; on a SQL database, run `better-files generate` and
+`better-files migrate` after adding it. Schedule `dr.maintain()` (or `better-files maintain --every <seconds>`) so
+failed deliveries are retried.
+
+## Options
+
+<TypeTable
+  type={{
+    maxAttempts: {
+      type: 'number',
+      description: 'Attempts per delivery, the first included, before it is given up.',
+      default: '8',
+    },
+    timeoutMs: { type: 'number', description: 'Timeout of one request.', default: '10000' },
+    allowPrivateNetworks: {
+      type: 'boolean',
+      description: 'Allow http:// URLs and private or loopback addresses. For development only.',
+      default: 'false',
+    },
+    deliverImmediately: {
+      type: 'boolean',
+      description: 'Send in the background right after the event. false leaves every delivery to dr.maintain().',
+      default: 'true',
+    },
+    secretRotationGraceMs: {
+      type: 'number',
+      description: 'How long the old secret keeps signing deliveries after a rotation. 0 retires it at once.',
+      default: '24 hours',
+    },
+    fetch: {
+      type: 'typeof fetch',
+      description: "Send through this fetch instead of Node's HTTP client. Weakens the protection against DNS rebinding (see below).",
+    },
+    resolver: {
+      type: '(hostname: string) => Promise<string[]>',
+      description: 'Resolves webhook hosts to IP addresses (custom DNS, tests).',
+      default: 'the system resolver',
+    },
+  }}
+/>
+
+## Manage webhooks
+
+All five endpoints are authorized as `better-files:webhooks:manage` on the tenant, not on a room. No room relation
+grants it: give it to the people or service accounts that manage integrations with a
+[Better IAM](/docs/guides/better-iam) policy or role. Everyone else gets `FORBIDDEN`.
+
+| Endpoint | Input | Returns |
+| --- | --- | --- |
+| `create` | `url`, `events`, `roomId?`, `description?` | the webhook, with its `secret` |
+| `list` | none | the tenant's webhooks, without secrets |
+| `update` | `webhookId`, `active?`, `events?`, `rotateSecret?` | the webhook; with its new `secret` when rotated |
+| `delete` | `webhookId` | `{ deleted: true }` |
+| `deliveries` | `webhookId`, `limit?` | recent deliveries, newest first |
+
+In the browser the same endpoints are on the client (`client.webhooks.list()`), and over HTTP they are
+`POST /api/better-files/webhooks/<endpoint>`.
+
+### Create
+
+<TypeTable
+  type={{
+    url: {
+      type: 'string',
+      description: 'The receiving endpoint, 8 to 2,048 characters. HTTPS, a public address, and no user name or password in the URL.',
+      required: true,
+    },
+    events: {
+      type: 'string[]',
+      description: '1 to 50 event patterns, such as document.*, qa.published or *.',
+      required: true,
+    },
+    roomId: { type: 'string', description: 'Only events of this room. The room must exist in the tenant.' },
+    description: { type: 'string', description: 'A note for people managing the webhook, up to 500 characters.' },
+  }}
+/>
+
+A pattern is `*` or a lowercase event type in which `*` stands for any run of characters: `document.*` matches
+`document.uploaded` and `document.renamed`, and `*` matches everything. The URL is checked when the webhook is
+created, so its host must already resolve to a public address.
+
+The webhook record has `id`, `url`, `events`, `roomId`, `description`, `active`, `createdBy`, `failures` (failed
+attempts since the last success), `lastDeliveryAt` and `createdAt`. The signing secret starts with `whsec_` and is
+returned only by `create` and by an `update` that rotates it.
+
+### Update, pause and delete
+
+`update` changes `events`, pauses or resumes a webhook with `active`, and rotates its secret with
+`rotateSecret: true`. Resuming a webhook resets its `failures` count. The URL, room and description cannot change:
+create a new webhook instead.
+
+Deliveries of a paused webhook are dropped when their turn comes, not kept for later. `delete` removes the webhook and
+all its deliveries.
+
+### Inspect deliveries
+
+```ts
+const deliveries = await dr.api.webhooks.deliveries(credential, { tenantId, webhookId: hook.id, limit: 20 });
+// [{ id, eventId, type, payload, attempts, nextAttemptAt, deliveredAt?, lastStatus?, lastError?, createdAt }]
+```
+
+`limit` is 1 to 200 (50 by default). `lastStatus` is the receiver's HTTP status and `lastError` the reason the last
+attempt failed, such as `HTTP 503` or a connection error.
+
+## What is delivered
+
+An event is matched against the tenant's active webhooks when it is published: by pattern, and by room for webhooks
+with a `roomId`. Each match becomes one delivery in the outbox. The request is a `POST` whose body is the event as
+JSON:
+
+```json
+{
+  "id": "…",
+  "type": "folder.created",
+  "tenantId": "…",
+  "roomId": "…",
+  "actorId": "…",
+  "occurredAt": 1791158400000,
+  "data": { "name": "Legal" }
+}
+```
+
+with these headers:
+
+| Header | Value |
+| --- | --- |
+| `content-type` | `application/json` |
+| `user-agent` | `Better-Files-Webhooks/1` |
+| `x-better-files-event` | the event type |
+| `x-better-files-delivery` | the delivery id, the same on every retry |
+| `x-better-files-signature` | `t=<unix seconds>,v1=<signature>` |
+
+Webhooks carry events, the same ones `dr.events` subscribers and plugin `onEvent` hooks receive. Activity entries a
+plugin only writes to the activity log, such as `search.performed`, are not events and are not delivered.
+
+## Verify the signature
+
+The signature is the hex HMAC-SHA256 of `<t>.<body>` with the webhook's secret, where `t` is the timestamp in the
+header and `body` is the raw request body. Verify it before you trust a delivery. `verifyWebhookSignature` does it,
+and rejects timestamps more than five minutes away to stop replays:
+
+```ts
+import { verifyWebhookSignature } from 'better-files/plugin-webhooks';
+
+export async function POST(request: Request) {
+  const body = await request.text(); // the raw body: do not parse and re-serialize it first
+  const valid = verifyWebhookSignature({
+    secret: process.env.BETTER_FILES_WEBHOOK_SECRET!,
+    body,
+    header: request.headers.get('x-better-files-signature'),
+  });
+  if (!valid) return new Response('invalid signature', { status: 401 });
+
+  const event = JSON.parse(body);
+  // Deliveries can repeat: skip ids you have already handled.
+  await handle(request.headers.get('x-better-files-delivery')!, event);
+  return new Response(null, { status: 204 });
+}
+```
+
+`toleranceSeconds` (300 by default) changes the replay window, and `now` (epoch milliseconds) the clock. The
+function compares signatures in constant time and returns `false` for a missing or malformed header.
+
+### Rotate the secret
+
+```ts
+const { secret } = await dr.api.webhooks.update(credential, { tenantId, webhookId, rotateSecret: true });
+```
+
+For `secretRotationGraceMs` after a rotation (24 hours by default), each delivery carries two signatures,
+`t=…,v1=<new>,v1=<old>`, and a receiver holding either secret accepts it. Deploy the new secret to the receiver
+within that time.
+
+## Retries and `dr.maintain()`
+
+A delivery succeeds when the receiver answers with a 2xx status. Redirects are not followed, so a 3xx counts as a
+failure.
+
+- With `deliverImmediately` (the default), the first attempt starts in the background right after the event is
+  published.
+- `dr.maintain()` sends deliveries that are due, up to 200 per run, oldest first.
+- After a failure, the next attempt waits 1 minute, then 2, 4, 8 and so on, at most 6 hours. After `maxAttempts`
+  attempts the delivery is given up; it stays in the outbox with its last error.
+- Before sending, each delivery is claimed in the database, so an immediate attempt, `dr.maintain()` and other
+  server instances never send it twice at once.
+- Successful deliveries are deleted a week after delivery.
+
+Delivery is at least once: a process that crashes after the receiver answered but before the result was saved
+sends the delivery again later, with the same `x-better-files-delivery` id. Deliveries are independent, so a retried
+event can arrive after later ones; order by `occurredAt` if it matters.
+
+A webhook is never paused automatically. Watch `failures` in `webhooks.list` and pause or fix webhooks that keep
+failing.
+
+## Protection against SSRF
+
+Server-side request forgery (SSRF) is when a user makes your server send requests to addresses only it can reach,
+such as a cloud metadata service or an internal admin page. Because tenants choose webhook URLs, the plugin refuses
+them unless `allowPrivateNetworks` is on:
+
+- The URL must use `https://` and must not contain a user name or password.
+- Every address the host resolves to must be public. Refused ranges include loopback, private networks
+  (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`), link-local and cloud metadata (`169.254.0.0/16`), carrier-grade
+  NAT, documentation, benchmarking, multicast and reserved ranges, and in IPv6 loopback, unique local, link-local,
+  site-local, multicast, documentation, Teredo and 6to4. IPv4-mapped and NAT64 addresses are judged by the IPv4
+  address they carry.
+- The check runs when a webhook is created and again before every attempt.
+- **DNS rebinding.** A host can resolve to a public address when checked and to a private one a moment later. The
+  built-in client (Node's HTTP client) checks the address it actually connects to, so a host that changes its answer
+  is refused at connect time. A custom `fetch` resolves the host again by itself, so with one only the earlier check
+  applies.
+
+Refused URLs fail `create` with `INVALID_INPUT` and a message such as
+`Webhook URLs cannot point to a non-public address`; refused deliveries fail with that message in `lastError`.
+
+<Callout type="warn" title="Secrets are stored in your database">
+  Signing secrets are kept in the `webhooks` table as they are, because each delivery needs them. Protect the
+  database at rest, and rotate a secret if it may have leaked.
+</Callout>
+
+## Errors
+
+| Code | When |
+| --- | --- |
+| `INVALID_INPUT` | an invalid URL or event pattern, `http://`, credentials in the URL, a host that does not resolve or resolves to a non-public address |
+| `NOT_FOUND` | `create` with a `roomId` outside the tenant; `update` or `delete` of an unknown webhook |
+| `FORBIDDEN` | the caller lacks `better-files:webhooks:manage` on the tenant |
+
+## Limits
+
+- Up to 50 patterns per webhook. A webhook covers the whole tenant or one room.
+- Retries need `dr.maintain()` to run; without it, only the immediate attempt is made.
+- Deliveries given up after `maxAttempts` are not retried automatically and stay in the outbox.
+- The receiver's response body is ignored.
+
+## Related
+
+- [Audit reports](/docs/plugins/audit): a room's participants, access and engagement in one file.
+- [Sync](/docs/plugins/sync): pull changes instead of receiving them.
+- [Better IAM integration](/docs/guides/better-iam)

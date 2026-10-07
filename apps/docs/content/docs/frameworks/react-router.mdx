@@ -1,0 +1,90 @@
+---
+title: React Router and Remix
+metaTitle: Better Files for React Router and Remix
+description: Serve the protocol from a resource route, and guard loaders and actions on the permission matrix with errors shaped for error boundaries.
+icon: ReactRouter
+packages:
+  - '@better-files/middleware'
+sources:
+  - packages/middleware/src/react-router.ts
+  - docs/guides/frameworks/react-router.md
+---
+
+`better-files/middleware/react-router` targets React Router v7 in framework mode, and Remix. Both give loaders and
+actions a web `Request`. The module imports neither framework.
+
+## Set up
+
+```ts title="app/better-files.server.ts"
+import { createBetterFilesRouter } from 'better-files/middleware/react-router';
+import { dr } from './better-files-instance.server';
+
+export const drRouter = createBetterFilesRouter(dr, {
+  // React Router does not expose the socket: read the client address your proxy sets.
+  ip: (request) => request.headers.get('x-forwarded-for')?.split(',')[0]?.trim(),
+});
+```
+
+## Mount the protocol
+
+A resource route answers the whole protocol:
+
+```ts title="app/routes/api.better-files.$.ts"
+import { drRouter } from '~/better-files.server';
+
+export const loader = drRouter.api;
+export const action = drRouter.api;
+```
+
+The route path must match `basePath`, which defaults to `/api/better-files/*`.
+
+## Guarded loaders
+
+```ts title="app/routes/rooms.$roomId.docs.$nodeId.tsx"
+export const loader = drRouter.guard(
+  ['VIEW'],
+  async (args, { api, held }) => ({
+    document: await api.documents.get({
+      tenantId: await tenantOf(args.request),
+      nodeId: args.params.nodeId!,
+    }),
+    canDownload: held.includes('DOWNLOAD_ORIGINAL'),
+  }),
+  { tenantId: (args) => tenantOf(args.request) },
+);
+```
+
+- `guard(capabilities, loader, select?)` throws a JSON `Response` (404 or 403) for the route's error boundary, where
+  `isRouteErrorResponse` recognizes it. Better Files errors thrown inside the loader are converted the same way.
+  Unexpected errors propagate unchanged.
+- The loader receives the bound helpers: `api`, `credential`, `capabilities(...)`, and `held`, every capability the
+  person has on the node.
+- Selectors default to the route params of the same names (`tenantId`, `roomId`, `nodeId`) and may be async.
+
+## Actions
+
+```ts
+export const action = drRouter.action(
+  async (args, { api }) => {
+    const form = await args.request.formData();
+    return api.documents.rename({
+      tenantId: await tenantOf(args.request),
+      nodeId: args.params.nodeId!,
+      name: String(form.get('name')),
+    });
+  },
+  { capabilities: ['EDIT'] },
+);
+```
+
+`action` returns refusals as `{ error: { code, message } }` with their status, for `useActionData` and
+`fetcher.data`. Redirects and unexpected errors propagate. Leave out `capabilities` to rely on the operation's own
+checks.
+
+## Other helpers
+
+| Helper                                          | What it does                                                         |
+| ----------------------------------------------- | -------------------------------------------------------------------- |
+| `drRouter.helpers({ request })`                 | `{ credential, api, capabilities }` for any loader or action.       |
+| `drRouter.require(args, capabilities, select?)` | Runs the check alone and returns `held`, or throws the `Response`.  |
+| `errorAsResponse(error)`                        | Builds the JSON error `Response` for your own code paths.           |

@@ -1,0 +1,74 @@
+[
+  {
+    "id": "room",
+    "term": "Room",
+    "definition": "A data room: a folder tree of documents with its own members, groups, permission matrix, settings and activity log. Rooms move through `draft`, `live`, `closed` and `archived`.",
+    "href": "/docs/guides/concepts"
+  },
+  {
+    "id": "node",
+    "term": "Node",
+    "definition": "A folder or a document in a room's tree. Permission entries, capabilities and trash all work on nodes.",
+    "href": "/docs/guides/concepts"
+  },
+  {
+    "id": "capability",
+    "term": "Capability",
+    "definition": "One thing a person may do with a node, such as `LIST`, `VIEW`, `DOWNLOAD_ORIGINAL` or `MANAGE`. Capabilities are bits, and plugins can register their own.",
+    "href": "/docs/reference/capabilities"
+  },
+  {
+    "id": "permission-matrix",
+    "term": "Permission matrix",
+    "definition": "The table of capabilities that groups and people hold on each folder and document, inherited down the tree. It is layer A of the two-layer check.",
+    "href": "/docs/guides/concepts/authorization"
+  },
+  {
+    "id": "preset",
+    "term": "Preset",
+    "definition": "A named set of capabilities, such as `view`, `download` or `manager`, used when granting access instead of listing capabilities one by one.",
+    "href": "/docs/reference/capabilities"
+  },
+  {
+    "id": "two-layer",
+    "term": "Two-layer authorization",
+    "definition": "Every operation needs both the capabilities on its node (the permission matrix) and the action from the identity system (Better IAM). Either layer can refuse.",
+    "href": "/docs/guides/concepts/authorization"
+  },
+  {
+    "id": "relation",
+    "term": "Room relation",
+    "definition": "A person's or group's role on a room in the identity system: `owner`, `admin`, `publisher`, `editor`, `contributor`, `viewer` or `auditor`. Relations decide which actions are allowed.",
+    "href": "/docs/reference/actions"
+  },
+  {
+    "id": "action",
+    "term": "Action",
+    "definition": "What the identity system decides on, in the `better-files:` namespace, such as `better-files:documents:download`.",
+    "href": "/docs/reference/actions"
+  },
+  {
+    "id": "ticket",
+    "term": "Ticket",
+    "definition": "A short-lived, signed, use-capped link that serves one file. Downloads and viewer pages are tickets, never direct storage URLs.",
+    "href": "/docs/guides/concepts/files"
+  },
+  {
+    "id": "activity-log",
+    "term": "Activity log",
+    "definition": "Each room's hash-chained record of what happened in it. `activity.verify` recomputes the chain and finds any record changed after the fact.",
+    "href": "/docs/guides/concepts/activity"
+  },
+  {
+    "id": "guest",
+    "term": "Guest",
+    "definition": "Someone from outside your organization invited into a room, such as a buyer or an auditor. Guests are bound by the room's guest rules and see only what the matrix grants.",
+    "href": "/docs/guides/better-iam"
+  },
+  {
+    "id": "plugin",
+    "term": "Plugin",
+    "definition": "A package that adds tables, capabilities, actions, endpoints, hooks or jobs to a Better Files instance, such as NDAs, watermarks or share links.",
+    "href": "/docs/plugins"
+  }
+]

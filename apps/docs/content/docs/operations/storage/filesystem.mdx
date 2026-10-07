@@ -1,0 +1,83 @@
+---
+title: Local disk
+description: Store files as plain files under one directory with fileStorage, for development, single servers and on-premises installs.
+metaTitle: Local disk storage
+icon: HardDrive
+packages: ['@better-files/storage-fs']
+sources:
+  - packages/storage-fs/src/index.ts
+  - packages/storage-fs/README.md
+  - tests/storage/storage.test.ts
+  - packages/core/src/ports.ts
+---
+
+During development, on a single server, or in an on-premises install without object storage, the simplest place for
+files is a directory on the server's own disk. `fileStorage` stores each object as one file under a root directory.
+
+```ts
+import { betterFiles } from 'better-files';
+import { fileStorage } from 'better-files/storage-fs';
+
+export const dr = betterFiles({
+  // iam, database, secret, plugins …
+  storage: fileStorage({ root: './data/files' }),
+});
+```
+
+The files on disk are what Better Files stores: ciphertext when encryption is on, which it is unless you pass
+`encryption: false`. See [Encryption](/docs/operations/encryption).
+
+## Options
+
+<TypeTable
+  type={{
+    root: {
+      type: 'string',
+      description: 'The directory objects live under, resolved against the working directory. Created when missing.',
+      required: true,
+    },
+  }}
+/>
+
+## Layout on disk
+
+A storage key maps to a path under `root`, one directory per `/` in the key. Better Files keys look like
+`t/{hash}/r/{hash}/{blobId}`, so each room's files share a directory.
+
+- **Atomic writes.** `put` writes to a temporary file next to the target (`{name}.{random}.tmp`) and renames it into
+  place, so readers never see a half-written object. A failed write removes the temporary file.
+- **Multipart uploads** stage each part as a file in `{root}/.multipart/{uploadId}/` (part numbers 1 to 10,000).
+  `complete` checks that every listed part is there, appends them in order into the target file and removes the
+  staging directory. `abort` removes the staging directory.
+- **Range reads** read only the requested bytes from the file.
+- **Copies** use the operating system's file copy.
+
+## Key safety
+
+Keys come from Better Files, but the adapter still refuses any key that could leave `root`. A key must:
+
+- start with a letter or digit and contain only letters, digits, `/`, `_`, `.`, `=` and `-`, up to 1,024 characters;
+- have no empty, `.` or `..` segments;
+- resolve to a path inside `root`.
+
+Anything else is `INVALID_INPUT` ("Invalid storage key"). Upload ids are checked the same way (8 to 64 characters
+of letters, digits, `_` and `-`).
+
+## When to use it
+
+- **Development and tests.** No services to run. For unit tests, `memoryStorage()` from `better-files/testing` is
+  faster still.
+- **One server, or a shared volume.** Every instance of your app must see the same directory. Several instances on
+  different machines need a shared file system, or a different adapter.
+- **On-premises installs** where the disk is the storage you have. For more than one server with replication, use the
+  [storage cluster](/docs/operations/storage/cluster) instead.
+
+`fileStorage` has no `presignPart`, so browsers cannot upload straight to it: `direct: true` uploads are refused
+with `UNSUPPORTED`, and files go through your server. Back up `root` together with the database; one without the
+other cannot be restored.
+
+## Related
+
+- [Storage overview](/docs/operations/storage)
+- [S3 and compatible](/docs/operations/storage/s3)
+- [Storage cluster](/docs/operations/storage/cluster)

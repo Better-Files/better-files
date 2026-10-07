@@ -1,0 +1,19 @@
+node_modules
+dist
+pnpm-lock.yaml
+artifacts
+work
+*.tsbuildinfo
+.next
+.next-*
+.source
+.cache
+apps/docs/generated
+apps/docs/content
+apps/docs/descriptions
+next-env.d.ts
+# BoardUI source (as in Better IAM's docs): kept in upstream formatting so updates diff cleanly.
+apps/docs/components/base
+apps/docs/styles/theme.css
+apps/docs/styles/typography.css
+apps/docs/utils/cx.ts

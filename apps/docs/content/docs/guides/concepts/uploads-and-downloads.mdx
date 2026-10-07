@@ -1,0 +1,403 @@
+---
+title: Uploads and downloads
+description: Upload sessions in one request or in parts, direct-to-storage uploads, signed download tickets, ZIP downloads and the secure viewer.
+metaTitle: Uploads and downloads in Better Files
+icon: ArrowDownToLine
+packages: ['@better-files/server', '@better-files/client', '@better-files/viewer']
+sources:
+  - packages/server/src/files.ts
+  - packages/server/src/index.ts
+  - packages/server/src/http.ts
+  - packages/server/src/engine.ts
+  - packages/server/src/endpoints/nodes.ts
+  - packages/server/src/access.ts
+  - packages/core/src/operations.ts
+  - packages/core/src/plugin.ts
+  - packages/core/src/capabilities.ts
+  - packages/crypto/src/index.ts
+  - packages/client/src/index.ts
+  - packages/client/src/direct.ts
+  - packages/viewer/src/server.ts
+  - packages/viewer/src/element.ts
+  - packages/plugin-watermark/src/index.ts
+---
+
+Files in a data room are large, confidential, and often needed by people who may only look at them. Uploads must
+survive flaky connections and serverless request limits. Downloads must go only to people allowed to have them, in
+the form they are allowed: a page image in a viewer, a copy stamped with their name, or the original file.
+
+Better Files handles both sides. An **upload session** takes a file in one request or in parts and encrypts it as it
+streams into storage. A **ticket** is a short-lived signed link for one file transfer, issued only after both
+authorization layers allowed it.
+
+```ts
+import { createBetterFilesClient } from 'better-files/client';
+import type { dr } from '@/server/better-files';
+
+const files = createBetterFilesClient<typeof dr>({ tenantId });
+
+// Upload: one request for small files, parallel retried parts for large ones.
+const { document } = await files.upload({
+  parentId: folderId,
+  file, // a File, Blob or Uint8Array
+  onProgress: ({ ratio }) => setProgress(ratio),
+});
+
+// Download: a ticket for a copy stamped with the caller's name (needs the watermark plugin).
+const ticket = await files.documents.requestDownload({ nodeId: document.id });
+window.location.assign(files.fileUrl(ticket.url));
+```
+
+## Upload sessions
+
+Every upload goes through three steps:
+
+1. `uploads.create` opens a session for a new document in a folder (`parentId`) or a new version of a document
+   (`documentId`). Give exactly one of them. It checks the name, the size limit and the `beforeUpload` hooks, then
+   returns where to send the bytes.
+2. The bytes arrive in one request, or in numbered parts.
+3. `uploads.complete` checks what arrived, creates the document or version, records `document.uploaded` or
+   `version.created` in the activity log, and runs the `afterUpload` hooks (a scanner may quarantine the version
+   here).
+
+`uploads.create` takes:
+
+<TypeTable
+  type={{
+    parentId: { type: 'string', description: 'The folder a new document goes into.' },
+    documentId: { type: 'string', description: 'Or the document this is a new version of.' },
+    filename: { type: 'string', description: 'The file name, checked like any node name.', required: true },
+    size: { type: 'number', description: 'The exact size in bytes. Larger than limits.maxFileSize is PAYLOAD_TOO_LARGE.', required: true },
+    mimeType: { type: 'string', description: 'The media type, such as application/pdf.' },
+    sha256: { type: 'string', description: 'The file checksum in hex. When given, complete refuses a file that does not match.' },
+    comment: { type: 'string', description: 'A version comment, up to 1,000 characters.' },
+    direct: { type: 'boolean', description: 'Upload straight to object storage (see Direct uploads).', default: 'false' },
+  }}
+/>
+
+It returns the session:
+
+<TypeTable
+  type={{
+    uploadId: { type: 'string', description: 'The session id.' },
+    multipart: { type: 'boolean', description: 'Whether the file is sent in parts.' },
+    partSize: { type: 'number', description: 'Plaintext bytes per part; the last part may be shorter.' },
+    parts: { type: 'number', description: 'How many parts to send (1 when not multipart).' },
+    contentUrl: { type: 'string', description: 'Where to PUT the whole file (single uploads).' },
+    partUrl: { type: 'string', description: 'Where to PUT each part, with {part} replaced by 1 to parts.' },
+    expiresAt: { type: 'number', description: 'When the session lapses (epoch milliseconds).' },
+    direct: { type: 'DirectUpload', description: 'Presigned part URLs and encryption parameters, for direct uploads only.' },
+  }}
+/>
+
+A session is multipart when the storage adapter supports multipart uploads and the file is larger than
+`limits.partSize`. A storage adapter without multipart support takes every file in one request.
+
+### Send the bytes
+
+Over HTTP, `PUT` the bytes to `contentUrl` or to `partUrl` with `{part}` replaced by the part number. Both URLs
+already carry the `tenantId` query parameter. The request needs the `x-better-files: 1` header and the same
+credential as the other calls.
+
+On the server, `dr.files.upload` does the same thing without HTTP:
+
+```ts
+const session = await dr.api.uploads.create(credential, {
+  tenantId,
+  parentId: folderId,
+  filename: 'Q3 report.pdf',
+  size: bytes.byteLength,
+  mimeType: 'application/pdf',
+});
+
+if (!session.multipart) {
+  await dr.files.upload(credential, { tenantId, uploadId: session.uploadId, body: bytes });
+} else {
+  for (let part = 1; part <= session.parts; part++) {
+    const start = (part - 1) * session.partSize;
+    const body = bytes.subarray(start, start + session.partSize);
+    await dr.files.upload(credential, { tenantId, uploadId: session.uploadId, part, body });
+  }
+}
+
+const { document, version } = await dr.api.uploads.complete(credential, {
+  tenantId,
+  uploadId: session.uploadId,
+});
+```
+
+`body` is a `Uint8Array` or a `ReadableStream`. Each call returns `{ uploadId, received, part? }`. Only the person
+who opened the session can send to it, and each request checks again that they still hold `UPLOAD` and `LIST` on
+the target and that the room is not closed: access can change while a large file is on its way.
+
+The server encrypts each request as it streams through and refuses a body of the wrong length: every part except the
+last must be exactly `partSize` bytes.
+
+### Resume and abort
+
+A session stays open for `limits.uploadTtlMs` (24 hours by default). Parts can arrive in any order and in parallel,
+and sending a part again replaces it, so a client that lost its connection keeps the `uploadId` and sends the parts
+it is not sure about again. `uploads.complete` refuses with `INVALID_INPUT` until every part is there. A whole-file
+upload cannot be sent twice; open a new session instead.
+
+`uploads.abort({ uploadId })` discards the session and its stored bytes. Sessions that lapse without being completed
+are discarded by `dr.maintain()`.
+
+### Limits
+
+| Limit | Default | Meaning |
+| --- | --- | --- |
+| `limits.maxFileSize` | 5 GiB | Largest file `uploads.create` accepts. |
+| `limits.partSize` | 8 MiB | Plaintext bytes per part. It must be a positive multiple of 64 KiB, the encryption segment size; S3 needs at least 5 MiB. |
+| `limits.uploadTtlMs` | 24 hours | How long a session stays open. |
+
+Set them in `betterFiles({ limits })`.
+
+### What complete checks
+
+`uploads.complete` assembles the parts and checks that the stored object has exactly the expected size. A
+multipart upload is then read back in full: that computes its SHA-256 and proves every encrypted segment decrypts. A
+file that fails the read-back, or does not match the `sha256` given to `uploads.create`, is deleted and the call
+fails with `INVALID_INPUT`. The version records the computed `sha256`.
+
+## The client uploader
+
+`client.upload(input)` runs the whole session for you: it opens it, sends the file in one request or in parallel
+parts, completes it, and returns `{ document, version }`. When anything fails, or `signal` aborts, it calls
+`uploads.abort` and throws.
+
+<TypeTable
+  type={{
+    parentId: { type: 'string', description: 'The folder a new document goes into.' },
+    documentId: { type: 'string', description: 'Or the document this is a new version of.' },
+    file: { type: 'Blob | Uint8Array', description: 'The content. A File also supplies the filename and type.', required: true },
+    filename: { type: 'string', description: 'Required unless file is a File.' },
+    mimeType: { type: 'string', description: 'Defaults to the Blob type.' },
+    comment: { type: 'string', description: 'A version comment.' },
+    concurrency: { type: 'number', description: 'Parts sent at the same time.', default: '3' },
+    retries: { type: 'number', description: 'Retries per part on network errors, 5xx and 429, with exponential backoff.', default: '3' },
+    signal: { type: 'AbortSignal', description: 'Cancels the upload and aborts the session.' },
+    onProgress: { type: '(progress: { loaded, total, ratio }) => void', description: 'Called as each part finishes.' },
+    direct: { type: 'boolean', description: 'Encrypt in the browser and send the parts straight to object storage.', default: 'false' },
+    tenantId: { type: 'string', description: 'Overrides the client tenant.' },
+  }}
+/>
+
+The client retries parts within one call. It does not keep sessions across page loads. The React, Vue and Svelte
+bindings wrap it with a list of uploads in progress (`useUpload()` in React); see
+[Frameworks](/docs/frameworks/client).
+
+## Direct uploads
+
+Serverless hosts limit request bodies, and proxying gigabytes through your app costs bandwidth. With
+`direct: true` the browser encrypts each part itself and `PUT`s it straight to object storage through presigned
+URLs. Your server never sees the bytes.
+
+```ts
+await files.upload({ parentId: folderId, file, direct: true });
+```
+
+How it works:
+
+1. `uploads.create` with `direct: true` always uses the store's multipart API, even for one part, and returns
+   `direct`: a presigned URL per part, the `partSize`, and the encryption parameters for this one file (its data
+   key, nonce prefix, additional authenticated data and segment size), or `null` when encryption is off.
+2. The client encrypts each part with WebCrypto in the same AES-256-GCM segment format the server writes, so a
+   direct upload is stored and downloaded exactly like a proxied one.
+3. The client completes with each part's `ETag`: `uploads.complete({ uploadId, parts: [{ part, etag }] })`.
+4. The server reads the whole file back. Parts that were encrypted wrongly or changed in storage fail to decrypt, so
+   the upload is deleted and refused with `INVALID_INPUT`. A client cannot store something that will not decrypt.
+
+Requirements:
+
+- A storage adapter with presigned parts: the S3, GCS and Azure adapters have them. Otherwise `uploads.create`
+  refuses with `UNSUPPORTED`.
+- Bucket CORS rules that allow `PUT` from your app's origin and expose the `ETag` header. Without the exposed header
+  the client fails with "Storage returned no ETag".
+
+<Callout type="warn" title="The data key goes to the uploader">
+  For a direct upload, the uploader's browser receives the data key of that one file, since it has to encrypt it.
+  Other files' keys never leave the server. Use proxied uploads where that is not acceptable.
+</Callout>
+
+## Downloads and tickets
+
+Nothing in a room is served by a guessable URL. To get a file, the caller asks for a **ticket**:
+
+- `documents.requestView` for the viewer copy (inline);
+- `documents.requestDownload` for a copy watermarked for the caller (always watermarked);
+- `documents.requestOriginal` for the original file.
+
+`requestDownload` and `requestOriginal` take:
+
+<TypeTable
+  type={{
+    nodeId: { type: 'string', description: 'The document.', required: true },
+    versionId: { type: 'string', description: 'An earlier version. Only people with EDIT on the document may ask for one.', default: 'the current version' },
+    disposition: { type: "'attachment' | 'inline'", description: 'Save the file, or show it in the browser.', default: "'attachment'" },
+  }}
+/>
+
+`requestView` takes `nodeId` and `versionId` only; its disposition is always `inline`. Each returns
+`{ token, url, expiresAt, filename, size, variant }`. `url` is a path, `{basePath}/files/{token}`: open it from the
+same origin, or turn it into an absolute URL with `client.fileUrl(url)`.
+
+```ts
+const ticket = await dr.api.documents.requestOriginal(credential, {
+  tenantId,
+  nodeId: documentId,
+  disposition: 'inline',
+});
+```
+
+### What a ticket is
+
+A ticket is a row in the `tickets` table plus a token: the ticket's random id and an HMAC-SHA256 of that id, keyed
+from your `secret`. The signature stops anyone from probing for ticket ids; changing the secret invalidates every
+ticket still out. The row says who it was issued to (with their name, email and IP address, for watermarks), which
+document version, which variant and which disposition.
+
+| Limit | Default | Meaning |
+| --- | --- | --- |
+| `limits.ticketTtlMs` | 60 seconds | How long a ticket is valid. |
+| `limits.ticketUses` | 5 | How many requests one ticket serves, so range requests and a resumed download work. |
+
+An unknown or expired ticket answers `404`; a used-up ticket answers `410`. `dr.maintain()` deletes expired rows.
+
+### What each request checks
+
+Before a ticket is issued, the request passes both authorization layers and then, in order:
+
+1. An earlier version needs `EDIT` on the document.
+2. The version must be ready. One still being scanned or processed is `QUARANTINED`; any other state is `CONFLICT`.
+3. When the room setting `requireMfaForDownload` is on, downloads (not views) need a session with a second factor
+   (`MFA_REQUIRED`).
+4. Every `beforeDownload` hook runs; any of them can refuse by throwing. NDA gates, network rules and rate limits
+   live here.
+
+Then the ticket is issued, the activity log records `document.viewed` or `document.downloaded` (with the variant and
+version), the `afterDownload` hooks run, and the matching event is emitted. An original download is also recorded in
+Better IAM's audit log as `better-files:documents:download-original`.
+
+### Capabilities
+
+| Call | Capability on the document | Better IAM action |
+| --- | --- | --- |
+| `documents.requestView` | `VIEW` | `better-files:documents:view` |
+| `documents.requestDownload` | `DOWNLOAD_WATERMARKED` | `better-files:documents:download` |
+| `documents.requestOriginal` | `DOWNLOAD_ORIGINAL` | `better-files:documents:download-original` |
+| `folders.requestDownload` | `LIST` on the folder, then a download capability per document | `better-files:documents:download` |
+| `viewer.open`, `viewer.pages` | `VIEW` | `better-files:documents:view` |
+
+Capabilities are clamped before these checks: a room with `downloadsEnabled: false` removes both download
+capabilities, and a document flagged `viewOnly` removes them along with `PRINT` and `COPY_TEXT`. See
+[Permissions](/docs/guides/concepts/permissions).
+
+### Serving a ticket
+
+Mounting `dr.handler` serves tickets at `GET {basePath}/files/{token}` (and `HEAD`). A host that routes files itself
+calls `dr.files.serve`:
+
+```ts
+// token: the last path segment of the ticket URL
+async function serveFile(request: Request, token: string): Promise<Response> {
+  return dr.files.serve(token, {
+    method: request.method,
+    range: request.headers.get('range'),
+  });
+}
+```
+
+The response streams. Stored files are encrypted in 64 KiB segments, each with its own authentication tag, so the
+server decrypts as it sends and never holds a whole file in memory. Responses carry `cache-control: private,
+no-store`, `nosniff`, and a sandboxing content security policy. With `disposition: 'attachment'` the content type is
+`application/octet-stream`, so a browser never renders the file in your origin.
+
+How each variant is produced:
+
+- **`original`** is served by the core, with single byte ranges (`Range: bytes=…`): only the segments that cover
+  the range are read and decrypted.
+- **Every other variant** (`watermarked`, `view`, viewer pages) comes from a plugin's `transformDownload` hook,
+  which receives the decrypted original and returns a new stream. The first hook that returns a result serves it.
+  When no hook produces the variant, the request is refused with `501 UNSUPPORTED`. It never falls back to the
+  original.
+
+The [watermark plugin](/docs/plugins/watermark) produces `watermarked` and, unless configured otherwise, `view`
+copies of PDFs and images. Without it, `requestDownload` still issues tickets, but they are refused when served.
+
+## Folder downloads
+
+`folders.requestDownload` returns a ticket for a ZIP of a folder: every document under it the caller may take, at
+its current version, in index order.
+
+```ts
+const zip = await dr.api.folders.requestDownload(credential, {
+  tenantId,
+  nodeId: folderId,
+  variant: 'watermarked', // the default; or 'original'
+});
+// zip: { token, url, expiresAt, files, excluded, bytes }
+```
+
+- `watermarked` stamps each file for the caller as it is zipped and needs `DOWNLOAD_WATERMARKED` per document.
+  `original` needs `DOWNLOAD_ORIGINAL` per document and is recorded in Better IAM's audit log.
+- `beforeDownload` hooks run for every document, so an NDA or network rule applies file by file.
+- `requireMfaForDownload` applies to both variants.
+- More than `limits.maxBundleFiles` documents (5000 by default) is `PAYLOAD_TOO_LARGE`.
+
+What is left out: documents the caller may not take that way, documents with no ready version, and (in a
+watermarked ZIP) files no hook can stamp, such as file types the watermark plugin does not handle. A watermarked ZIP
+never contains an unstamped original. The archive holds an `index.csv` with each file's path, version, size and
+SHA-256, and a `NOT-INCLUDED.txt` that counts or names what was left out. `excluded` in the response counts the
+documents left out when the ZIP was requested.
+
+A ZIP ticket is valid for 10 minutes and serves two requests. The ZIP is built while it streams, so a document
+trashed in the meantime is listed in `NOT-INCLUDED.txt` instead.
+
+## The secure viewer
+
+For people who may look but not take, the viewer shows a document as server-rendered page images. The file never
+reaches the browser: each page is rendered to a WebP image with the viewer's name, the time and a short code tiled
+across it, and fetched through its own short-lived ticket as it scrolls into view.
+
+Register the server side as a plugin:
+
+```ts
+import { viewerPlugin } from 'better-files/viewer';
+
+export const dr = betterFiles({
+  // iam, database, storage, secret
+  plugins: [viewerPlugin()],
+});
+```
+
+It renders PDFs with `unpdf` and images with `@napi-rs/canvas`; install both. Other file types are shown through
+their PDF rendition when the [processing plugin](/docs/plugins/processing) made one, and otherwise report that no
+preview is available. `viewerPlugin` takes `scale` (default 1.5), `batch` (page tickets per call, default 10),
+`maxBytes` (default 100 MiB), `watermark` (a function of the viewer's stamp, or `false`) and `renderer`.
+
+In the browser, define the `bf-viewer` element and give it a client:
+
+```ts
+import { defineBetterFilesViewer } from 'better-files/viewer';
+
+defineBetterFilesViewer();
+const viewer = document.createElement('bf-viewer');
+viewer.client = createBetterFilesClient<typeof dr>({ tenantId });
+viewer.setAttribute('node-id', documentId);
+container.append(viewer);
+```
+
+`viewer.open` runs `documents.requestView` first, so the view passes the same checks and is recorded as
+`document.viewed`. The element blocks the context menu, dragging, printing and the copy and save shortcuts. These
+only raise the effort of copying; the watermark is what ties a screenshot back to its viewer. It dispatches
+`bf-viewer-open` and `bf-viewer-error`, and is styled with `::part(page)`, `::part(image)`, `::part(status)` and the
+`--bf-viewer-gap` and `--bf-viewer-background` properties.
+
+## Related
+
+- [Permissions](/docs/guides/concepts/permissions): where `VIEW` and the download capabilities come from.
+- [Watermarking](/docs/plugins/watermark): the plugin that produces watermarked and view copies.
+- [Client](/docs/frameworks/client): the browser client, uploads and file links.
+- [Storage](/docs/operations/storage) and [Encryption](/docs/operations/encryption)
+- [Activity log](/docs/guides/concepts/activity-log): what views and downloads record.

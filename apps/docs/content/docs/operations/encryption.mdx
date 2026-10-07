@@ -1,0 +1,387 @@
+---
+title: Encryption
+description: How Better Files encrypts every stored file with its own data key, which key providers wrap those keys, and how deleting a room destroys its data.
+metaTitle: Encryption at rest and key management
+icon: LockKeyhole
+packages: ['@better-files/crypto', '@better-files/kms', '@better-files/iam']
+sources:
+  - docs/adr/0004-crypto-format.md
+  - packages/crypto/src/index.ts
+  - packages/core/src/ports.ts
+  - packages/core/src/tables.ts
+  - packages/server/src/index.ts
+  - packages/server/src/options.ts
+  - packages/server/src/files.ts
+  - packages/server/src/endpoints/rooms.ts
+  - packages/iam/src/index.ts
+  - packages/kms/src/index.ts
+  - packages/kms/src/aws.ts
+  - packages/kms/src/gcp.ts
+  - packages/kms/src/azure.ts
+  - packages/kms/src/vault.ts
+  - packages/kms/src/compose.ts
+  - packages/kms/src/regional.ts
+  - packages/kms/src/credentials.ts
+  - packages/kms/src/shared.ts
+  - packages/kms/README.md
+  - packages/cli/src/cli.ts
+---
+
+A data room holds a company's most sensitive documents, and its files sit in a bucket or on disks that other people
+operate. Anyone with access to that storage, or to a copy of a backup, should see nothing useful. And when a deal is
+over and the room is deleted, the files should be gone for good, including from backups nobody remembers.
+
+Better Files encrypts every file before it reaches storage, with a key of its own. That key is stored only in wrapped
+form, encrypted by a **key provider**: Better IAM's key management service (KMS), your cloud's KMS, or a local secret
+during development. With a key per room, deleting the room destroys the key, and with it every copy of the room's
+files.
+
+```ts
+import { betterFiles } from 'better-files';
+import { betterIamIntegration } from 'better-files/iam';
+
+export const dr = betterFiles({
+  // Encrypts with Better IAM's KMS, a key per room. Needs systemCredential.
+  iam: betterIamIntegration(iam, { iamPlugin, systemCredential }),
+  database,
+  storage,
+  secret: process.env.BETTER_FILES_SECRET!,
+});
+```
+
+For development without a KMS, pass a local key provider:
+
+```ts
+import { betterFiles, localKeyProvider } from 'better-files';
+
+export const dr = betterFiles({
+  // …
+  encryption: { keys: localKeyProvider({ secret: process.env.BETTER_FILES_SECRET! }) },
+});
+```
+
+## What betterFiles() requires
+
+The `encryption` option takes `{ keys }` or `false`:
+
+<TypeTable
+  type={{
+    encryption: {
+      type: '{ keys: KeyProvider } | false',
+      description: 'The key provider that wraps data keys, or false to store files unencrypted (development only).',
+      default: "the identity integration's key provider",
+    },
+  }}
+/>
+
+`betterFiles()` resolves the key provider in this order: `encryption.keys`, then the integration's own provider
+(`betterIamIntegration` offers Better IAM's KMS). If neither exists and `encryption` is not `false`, it refuses to
+start with `INVALID_CONFIG` and the message
+`Configure encryption: { keys } (localKeyProvider, betterIamKeys or a cloud KMS), or encryption: false for development`.
+
+The message mentions `betterIamKeys`; in this release Better IAM's KMS comes from `betterIamIntegration` (see
+[Better IAM KMS](#better-iam-kms)), not from a separate export.
+
+`better-files doctor --tenant <id>` generates and unwraps one data key to check the provider end to end.
+
+## The format
+
+Every stored file, called a **blob**, is encrypted with segmented AES-256-GCM, in the STREAM construction. A document
+version, each of its renditions, and every file a plugin produces is its own blob.
+
+| Parameter | Value |
+| --- | --- |
+| Cipher | AES-256-GCM with a 32-byte data key, fresh for every blob |
+| Segment | 64 KiB of plaintext (`SEGMENT_SIZE`); every segment but the last is full |
+| Stored segment | the ciphertext followed by its 16-byte tag |
+| Stored size | plaintext size + 16 bytes per segment (0.024% overhead) |
+| Nonce (12 bytes) | a random 7-byte prefix per blob, the segment index (uint32, big-endian), a last-segment flag |
+| Additional authenticated data | the blob id, on every segment |
+| Empty file | one empty, final segment |
+
+What this buys:
+
+- **Streaming.** Uploads and downloads never hold a whole file in memory.
+- **Random access.** Segment `n` starts at byte `n × (65536 + 16)`, so a range request or a viewer page fetches and
+  decrypts only the segments it needs (`ciphertextRange`). Multipart parts are encrypted on their own, in parallel.
+- **Tamper detection.** The index in the nonce detects reordered segments, the last-segment flag detects truncation,
+  and the blob id in the authenticated data stops ciphertext from being moved onto another blob. A segment that does
+  not decrypt fails the read with `INTERNAL_ERROR` ("Stored file failed its integrity check").
+
+There is no header in the stored object: it is opaque ciphertext. The format lives on the blob's row in the database,
+as `encryption: { algorithm: 'AES-256-GCM-STREAM', segmentSize, noncePrefix }`, next to the wrapped data key
+(`wrappedKey`) and the reference of the key that wrapped it (`keyRef`). A future format would get a new `algorithm`
+value while old blobs stay readable.
+
+## Envelope encryption
+
+Data keys are never stored in plaintext. When a blob is created, the server asks the key provider for a fresh data
+key, uses it, and keeps only the wrapped copy; the plaintext key is zeroed after use. Reading the blob asks the
+provider to unwrap it again.
+
+Each data key is wrapped under an **encryption context**:
+
+```ts
+{ purpose: 'better-files-blob', tenantId, roomId, blobId }
+```
+
+Providers bind the wrapped key to that context (canonicalized as sorted JSON by `contextBytes`), so a wrapped key
+copied onto another blob or room does not unwrap. With AWS KMS the context is also recorded in CloudTrail on every
+decrypt.
+
+### Direct uploads
+
+A [direct upload](/docs/operations/storage#direct-uploads) encrypts in the browser with WebCrypto, in the same format.
+The server generates and wraps the data key, then gives the plaintext key, nonce prefix and authenticated data for
+that one blob to the authorized uploader. When the upload completes, the server reads the whole object back and
+rejects it if any segment fails to decrypt, so a client cannot store data the server cannot read.
+
+## The KeyProvider port
+
+```ts
+type EncryptionContext = Record<string, string>;
+
+interface KeyProvider {
+  readonly id: string;
+  /** Creates a key for one room, so deleting the room can destroy its data (crypto-shredding). Optional. */
+  createRoomKey?(input: { tenantId: string; roomId: string; region?: string }): Promise<string>;
+  /** Schedules the room key's destruction. Optional. */
+  retireRoomKey?(input: { tenantId: string; roomId: string; keyRef: string }): Promise<void>;
+  /** A fresh data key and its wrapped form. The plaintext must never be stored. */
+  generateDataKey(input: {
+    tenantId: string;
+    keyRef?: string;
+    context: EncryptionContext;
+  }): Promise<{ plaintext: Uint8Array; wrapped: string; keyRef: string }>;
+  decryptDataKey(input: {
+    tenantId: string;
+    keyRef: string;
+    wrapped: string;
+    context: EncryptionContext;
+  }): Promise<Uint8Array>;
+}
+```
+
+- When a room is created, `createRoomKey` (if the provider has it) returns a key reference that is saved on the room
+  (`rooms.kmsKeyId`, never returned by the API). `region` is the room's
+  [data-residency region](/docs/operations/storage/regional).
+- Every blob of that room is then wrapped with `generateDataKey({ keyRef })`, using the room's key.
+- `rooms.delete` removes the room's rows and stored files, then calls `retireRoomKey` with the room's key reference.
+
+## Key providers
+
+| Provider | Import | Keys per room | For |
+| --- | --- | --- | --- |
+| Better IAM KMS | `betterIamIntegration` from `better-files/iam` | yes (default) | the default with Better IAM |
+| `localKeyProvider` | `better-files` or `better-files/crypto` | no | development, tests, single servers |
+| `awsKms` | `better-files/kms` | with `perRoomKeys` | AWS KMS |
+| `gcpKms` | `better-files/kms` | with `perRoomKeys` | Google Cloud KMS |
+| `azureKeyVault` | `better-files/kms` | with `perRoomKeys` | Azure Key Vault and Managed HSM |
+| `vaultTransit` | `better-files/kms` | with `perRoomKeys` | HashiCorp Vault and OpenBao Transit |
+
+### localKeyProvider
+
+`localKeyProvider({ secret })` derives a key-encryption key per tenant from one secret (HKDF-SHA256) and wraps data
+keys with AES-256-GCM, using the encryption context as authenticated data. The secret needs at least 32 characters
+(`INVALID_CONFIG` otherwise).
+
+It suits development, tests and single-server installs. It has no room keys, so deleting a room does not destroy
+keys, and the keys cannot be rotated: anyone with the secret and the database can unwrap every data key. Keep the
+secret stable; changing it makes every stored file unreadable.
+
+### Better IAM KMS
+
+`betterIamIntegration` provides a key provider backed by Better IAM's KMS (`api.keys`) when:
+
+- the Better IAM instance has the KMS API (`betterIamFeatures(iam).kms`);
+- you pass `systemCredential`, because KMS calls also happen outside any request (downloads, maintenance) and use
+  the system service account. Its role needs the `iam:kms:*` actions in `systemPolicy(iam)`;
+- `keys` is not `false`.
+
+The `keys` option chooses how keys are made:
+
+<TypeTable
+  type={{
+    keys: {
+      type: '{ perRoom?: boolean } | false',
+      description: 'A Better IAM KMS key per room (default), one key per tenant with perRoom: false, or false for no Better IAM keys.',
+      default: 'a key per room',
+    },
+  }}
+/>
+
+- **Per room (default).** Creating a room creates a KMS key tagged with the room id. Deleting the room schedules that
+  key's deletion with a 7-day waiting period. After that, the room's ciphertext, including any copy in a backup, can
+  no longer be decrypted. This is **crypto-shredding**.
+- **Per tenant (`perRoom: false`).** Every room of the tenant uses one key with the alias `alias/better-files`,
+  created on first use.
+- **`false`.** The integration offers no key provider. Pass `encryption: { keys }` yourself.
+
+See [Keys and audit](/docs/guides/better-iam/keys-and-audit).
+
+### Cloud KMS (bring your own key)
+
+`better-files/kms` wraps data keys with a key in your own KMS, so the database and storage of the host never hold a
+usable key. Each provider talks to its service over `fetch`, with no cloud SDK.
+
+<Tabs items={['AWS KMS', 'Google Cloud KMS', 'Azure Key Vault', 'Vault Transit']} groupId="kms">
+  <Tab value="AWS KMS">
+    ```ts
+    import { awsKms } from 'better-files/kms';
+
+    const keys = awsKms({
+      region: 'eu-west-1',
+      keyId: 'alias/better-files', // key id, ARN or alias for rooms without a key of their own
+      perRoomKeys: true, // a KMS key per room: deleting the room destroys its files
+    });
+    // betterFiles({ …, encryption: { keys } })
+    ```
+
+    | Option | Meaning |
+    | --- | --- |
+    | `region`, `keyId` | required |
+    | `credentials` | static keys or a function; default `awsCredentials()` (environment, web identity, container role, EC2 role) |
+    | `endpoint` | a VPC endpoint or a local emulator; default `https://kms.{region}.amazonaws.com` |
+    | `perRoomKeys` | `true`, or `{ pendingWindowInDays?, tags?, policy? }`; off by default because each key is billed monthly |
+    | `retries`, `fetch` | retries for throttling and server errors (default 2), and the fetch implementation |
+
+    Data keys come from `GenerateDataKey` with the encryption context. Retiring a room key calls `ScheduleKeyDeletion`
+    with `pendingWindowInDays` (7 to 30, default 7). The credentials need `kms:GenerateDataKey` and `kms:Decrypt` on the
+    key, and permission to create and schedule deletion of keys when `perRoomKeys` is on.
+
+  </Tab>
+  <Tab value="Google Cloud KMS">
+    ```ts
+    import { gcpKms, gcpMetadataToken } from 'better-files/kms';
+
+    const keys = gcpKms({
+      keyName: 'projects/acme/locations/europe-west1/keyRings/better-files/cryptoKeys/default',
+      accessToken: gcpMetadataToken(), // or a token string, or any function returning one
+    });
+    ```
+
+    | Option | Meaning |
+    | --- | --- |
+    | `keyName` | `projects/{project}/locations/{location}/keyRings/{ring}/cryptoKeys/{key}`; required |
+    | `accessToken` | an OAuth token with the Cloud KMS scope, or a function returning one; required |
+    | `endpoint` | default `https://cloudkms.googleapis.com` |
+    | `perRoomKeys` | `true`, or `{ protectionLevel?: 'SOFTWARE' or 'HSM', labels? }`: a crypto key per room in the same key ring |
+    | `retries`, `fetch` | as above |
+
+    Data keys are wrapped with `encrypt`, binding the context as additional authenticated data. Cloud KMS never deletes
+    keys, so retiring a room key destroys its versions (after the key's scheduled-destruction period). The identity
+    needs `roles/cloudkms.cryptoKeyEncrypterDecrypter`.
+
+    `gcpMetadataToken({ scopes?, serviceAccount? })` gets tokens from the metadata server of a Google Cloud host (GCE,
+    GKE Workload Identity, Cloud Run, Cloud Functions) and caches them.
+
+  </Tab>
+  <Tab value="Azure Key Vault">
+    ```ts
+    import { azureIdentityToken, azureKeyVault } from 'better-files/kms';
+
+    const keys = azureKeyVault({
+      vaultUrl: 'https://acme.vault.azure.net',
+      keyName: 'better-files',
+      accessToken: azureIdentityToken(),
+    });
+    ```
+
+    | Option | Meaning |
+    | --- | --- |
+    | `vaultUrl` | `https://{vault}.vault.azure.net` or a Managed HSM URL; required |
+    | `keyName` | required |
+    | `accessToken` | a Microsoft Entra token for `https://vault.azure.net`, or a function returning one; required |
+    | `algorithm` | `RSA-OAEP-256` (default), `RSA-OAEP`, or `A256KW` for Managed HSM `oct-HSM` keys |
+    | `apiVersion` | the Key Vault API version |
+    | `perRoomKeys` | `true`, or `{ keyType?: 'RSA' or 'RSA-HSM', keySize?: 2048, 3072 or 4096 }` |
+    | `retries`, `fetch` | as above |
+
+    The provider wraps a random seed with `wrapKey` and derives the data key from the seed and the context (HKDF), so
+    the context is bound even though Key Vault has no context parameter. Retiring a room key deletes it (recoverable
+    during the vault's soft-delete period). The identity needs the `wrapKey` and `unwrapKey` key permissions (Key
+    Vault Crypto User).
+
+    `azureIdentityToken({ resource?, clientId? })` gets tokens from workload identity
+    (`AZURE_FEDERATED_TOKEN_FILE`), an App Service identity, or the VM managed identity. For Managed HSM pass
+    `resource: 'https://managedhsm.azure.net'`.
+
+  </Tab>
+  <Tab value="Vault Transit">
+    ```ts
+    import { vaultTransit } from 'better-files/kms';
+
+    const keys = vaultTransit({
+      address: 'https://vault.acme.internal:8200',
+      token: () => readVaultToken(), // a token, or a function returning one (AppRole, Kubernetes auth)
+      keyName: 'better-files',
+    });
+    ```
+
+    | Option | Meaning |
+    | --- | --- |
+    | `address`, `token`, `keyName` | required |
+    | `mount` | where the transit engine is mounted; default `transit` |
+    | `namespace` | the Vault Enterprise or HCP namespace |
+    | `perRoomKeys` | `true`, or `{ type?: 'aes256-gcm96' or 'chacha20-poly1305' }`: a transit key per room |
+    | `retries`, `fetch` | as above |
+
+    Like Azure, the context is bound by HKDF over the wrapped seed. Retiring a room key allows its deletion and deletes
+    it. The token needs `update` on `transit/datakey/plaintext/<key>` and `transit/decrypt/<key>`.
+
+  </Tab>
+</Tabs>
+
+With `perRoomKeys`, creating a room creates a key in the KMS and deleting the room retires it, as described for each
+provider. Providers never retire the shared default key. Without `perRoomKeys`, every room uses the configured key.
+
+Key references are namespaced by provider (`aws-kms:…`, `gcp-kms:…`, `azure-kv:…`, `vault:…`), and each provider
+checks a reference before using it: a reference outside the configured vault or key ring is refused, so a tampered
+database row cannot send a token to another host.
+
+Throttling and server errors (429 and 5xx, and AWS `ThrottlingException`) are retried twice with jittered backoff.
+Other failures throw `KmsHttpError`, a Better Files error with `status` and the service's `kmsCode`.
+
+### Combining providers
+
+- **`migratingKeys({ current, previous })`** switches to a new provider without re-encrypting anything: new blobs and
+  room keys use `current`, and existing blobs go back to whichever provider wrapped them, found by their key
+  reference. Providers must have different ids.
+
+  ```ts
+  import { localKeyProvider } from 'better-files';
+  import { awsKms, migratingKeys } from 'better-files/kms';
+
+  const keys = migratingKeys({
+    current: awsKms({ region: 'eu-west-1', keyId: 'alias/better-files' }),
+    previous: [localKeyProvider({ secret: process.env.BETTER_FILES_SECRET! })],
+  });
+  ```
+
+- **`cachingKeys(provider, { maxAgeMs?, maxEntries? })`** keeps unwrapped data keys in memory (default 5 minutes and
+  1,000 keys), so streaming a popular document does not call the KMS every time. Plaintext keys then stay in process
+  memory, and revoking access in the KMS takes effect only after `maxAgeMs`. The result has a `clear()` method.
+- **`regionalKeys({ regions, defaultRegion })`** keeps each room's keys in the KMS of its data-residency region. See
+  [Data residency](/docs/operations/storage/regional#keys-in-the-rooms-region).
+
+## Turning encryption off
+
+`encryption: false` stores files as plain bytes: blobs get no data key, and direct uploads send plaintext. Use it
+only in development or tests. `better-files doctor` reports it as "off: files are stored in plain text".
+
+Files stored without encryption stay unencrypted when you turn it on later; new files are encrypted.
+
+## Limits
+
+- Re-wrapping existing data keys under a new key is not implemented. Rotating a KMS key that keeps its old versions
+  able to decrypt works without it; retiring an old key version needs it.
+- `AES-256-GCM-STREAM` is the only format.
+- With a direct upload, the uploading browser briefly holds the data key of the one blob it uploads. That is inherent
+  to client-side encryption.
+
+## Related
+
+- [Storage](/docs/operations/storage): what is stored, and where.
+- [Data residency](/docs/operations/storage/regional)
+- [Keys and audit](/docs/guides/better-iam/keys-and-audit)
+- [Security](/docs/operations/security)

@@ -1,0 +1,208 @@
+---
+title: Document processing
+description: Office and other formats get a PDF rendition, so the viewer and watermarked downloads work for them, and every document gets a thumbnail.
+metaTitle: Office to PDF conversion and thumbnails
+icon: Cpu
+packages: ['@better-files/plugin-processing']
+sources:
+  - packages/plugin-processing/src/index.ts
+  - packages/plugin-processing/src/libreoffice.ts
+  - packages/plugin-processing/README.md
+  - packages/plugin-processing/package.json
+  - packages/core/src/plugin.ts
+  - tests/plugins/processing.test.ts
+---
+
+People upload Word, Excel and PowerPoint files to a data room, but the secure viewer and watermarked downloads work
+on PDFs and images. Without help, a `.docx` can only be downloaded as the original, which a view-only participant may
+not be allowed to do. File listings also look better with a small preview of each document.
+
+The processing plugin runs after each upload. It turns formats it has a **converter** for into a PDF **rendition** (a
+derived file stored next to the version) and makes a thumbnail of PDFs and images. The viewer and watermark plugins
+pick up the PDF rendition on their own, so a watermarked download of a `.docx` is a stamped `.pdf`.
+
+```ts
+import { betterFiles } from 'better-files';
+import { processingPlugin, libreOffice } from 'better-files/plugin-processing';
+import { watermarkPlugin } from 'better-files/plugin-watermark';
+
+const plugins = [
+  processingPlugin({ converters: [libreOffice()] }), // needs `soffice` (LibreOffice) on the server
+  watermarkPlugin(),
+] as const;
+
+export const dr = betterFiles({ /* iam, database, storage, secret */ plugins });
+```
+
+The plugin adds no Better IAM actions of its own, so it needs nothing extra in `betterFilesIamPlugin({ plugins })`;
+pass the same `plugins` there anyway, as for every plugin. It owns one table, `processingJobs`; on a SQL database, run
+`better-files generate` and `better-files migrate` after adding it.
+
+## Options
+
+<TypeTable
+  type={{
+    converters: {
+      type: 'readonly Converter[]',
+      description: 'Turn non-PDF documents into PDF. The first converter whose accepts() returns true is used. Without converters only PDFs and images are processed (thumbnails).',
+      default: '[]',
+    },
+    thumbnails: {
+      type: 'number | false',
+      description: 'Thumbnail width in pixels, or false for no thumbnails. Images narrower than this are not scaled up.',
+      default: '320',
+    },
+    maxBytes: {
+      type: 'number',
+      description: 'The largest file processed. A larger file is recorded as failed with "The file is too large to process".',
+      default: '100 MiB',
+    },
+    mode: {
+      type: "'background' | 'inline'",
+      description: 'background returns from the upload before processing finishes; inline waits for it (scripts and tests).',
+      default: "'background'",
+    },
+  }}
+/>
+
+## What happens after an upload
+
+The plugin listens to the `document.uploaded`, `version.created`, `version.restored` and `version.scanned` events. For
+the version named in the event it:
+
+1. Skips the version unless its status is `ready`. A version held by the [scan plugin](/docs/plugins/scan) waits, and
+   `version.scanned` brings it back once it is clean.
+2. Reads the decrypted file, up to `maxBytes`.
+3. If the file is not already a PDF (it starts with `%PDF-`) and its MIME type is not an image (`png`, `jpeg`,
+   `webp`, `gif`, `avif`, `bmp`), asks the first matching converter for a PDF. Output that is not a PDF counts as a
+   failure. The PDF is stored as the rendition of kind `pdf`, with the converter's id in its metadata.
+4. If `thumbnails` is set and there is a PDF (the original or the converted one) or an image, renders the first page
+   or the image at that width and stores a WebP thumbnail as the rendition of kind `thumbnail`, with its `width` and
+   `height`.
+5. Records a job for the version in `processingJobs` and publishes `version.processed`.
+
+Renditions go through core's rendition store: they are encrypted like the file and deleted with it.
+
+Each job ends in one of three states:
+
+| Status | Meaning |
+| --- | --- |
+| `done` | A PDF rendition, a thumbnail, or both were stored. |
+| `skipped` | Nothing applied: no converter accepted the file and it is neither a PDF nor an image, or thumbnails are off. |
+| `failed` | Reading, converting or rendering threw. The first 500 characters of the message are kept in `error`. |
+
+### Thumbnails need two optional packages
+
+Thumbnails use `@napi-rs/canvas` to draw and encode, and `unpdf` to render the first page of a PDF. Both are optional
+peer dependencies of the plugin, so install them in your app when thumbnails are on:
+
+```npm
+npm i @napi-rs/canvas unpdf
+```
+
+Without them, thumbnail rendering throws and the job is recorded as `failed`. Set `thumbnails: false` if you only
+want PDF conversion.
+
+## LibreOffice
+
+`libreOffice()` returns a converter that runs LibreOffice in headless mode (`soffice --headless --convert-to pdf`).
+It accepts files by extension: Word (`.doc`, `.docx`, `.docm`, `.dot`, `.dotx`), Excel (`.xls`, `.xlsx`, `.xlsm`,
+`.xlsb`, `.csv`), PowerPoint (`.ppt`, `.pptx`, `.pptm`, `.pps`, `.ppsx`), OpenDocument (`.odt`, `.ott`, `.ods`,
+`.odp`), Visio (`.vsd`, `.vsdx`), iWork (`.pages`, `.numbers`, `.key`), and `.rtf`, `.wpd`, `.txt`, `.html`, `.htm`.
+
+<TypeTable
+  type={{
+    binary: {
+      type: 'string',
+      description: 'The soffice executable to run.',
+      default: "'soffice' (on the PATH)",
+    },
+    timeoutMs: {
+      type: 'number',
+      description: 'Time allowed per conversion before the process is stopped.',
+      default: '120000',
+    },
+  }}
+/>
+
+Each conversion runs in its own temporary folder with its own LibreOffice profile, so conversions can run in
+parallel. The file is written there under a neutral name (`document` plus the original extension; the original name
+is untrusted input), and the folder is removed afterwards. Files never leave the machine.
+
+Install LibreOffice on every server that runs Better Files, for example the `libreoffice` package on Debian or
+Ubuntu, and pass `binary` when `soffice` is not on the PATH:
+
+```ts
+libreOffice({ binary: '/usr/bin/soffice', timeoutMs: 60_000 });
+```
+
+### Your own converter
+
+A converter is an object with an `id` and two methods. Wrap a conversion API this way:
+
+```ts
+import type { Converter } from 'better-files/plugin-processing';
+
+const conversionApi: Converter = {
+  id: 'my-converter',
+  accepts: ({ filename }) => filename.toLowerCase().endsWith('.docx'),
+  async toPdf({ bytes }) {
+    const response = await fetch('https://convert.example.com/pdf', { method: 'POST', body: bytes });
+    return new Uint8Array(await response.arrayBuffer());
+  },
+};
+
+processingPlugin({ converters: [conversionApi, libreOffice()] });
+```
+
+## Endpoints
+
+All three take a `tenantId` like every operation. In the browser, the [typed client](/docs/frameworks/client) fills
+it in: `files.processing.status({ nodeId })`.
+
+| Endpoint | Input | Action and capability | Returns |
+| --- | --- | --- | --- |
+| `processing.status` | `nodeId` | `better-files:documents:view`, `VIEW` on the document | `{ versionId, status, pdf, thumbnail, error? }` for the current version |
+| `processing.thumbnails` | `roomId`, `nodeIds` (1 to 100) | `better-files:documents:list` on the room (also when closed) | A map from node id to `{ url, width?, height? }` |
+| `processing.reprocess` | `nodeId` | `better-files:documents:edit`, `EDIT` on the document | `{ versionId, status, pdf, thumbnail }` after running again |
+
+```ts
+const state = await dr.api.processing.status(credential, { tenantId, nodeId });
+// { versionId, status: 'pending' | 'done' | 'skipped' | 'failed', pdf, thumbnail, error? }
+
+const thumbs = await dr.api.processing.thumbnails(credential, { tenantId, roomId, nodeIds });
+// { [nodeId]: { url: 'data:image/webp;base64,…', width: 320, height: 452 } }
+```
+
+- `status` answers `pending` while no job exists for the current version. Folders are refused with `INVALID_INPUT`,
+  and a document without a current version with `NOT_FOUND`.
+- `thumbnails` returns entries only for documents the caller has `VIEW` on, that are not deleted, and that have a
+  thumbnail. Each thumbnail is returned inline as a data URL; a stored thumbnail over 2 MiB makes the whole call fail
+  with `PAYLOAD_TOO_LARGE`.
+- `reprocess` runs the work inside the request and waits for it, whatever `mode` says.
+
+## Retries and `dr.maintain()`
+
+`dr.maintain()` retries failed jobs: up to 20 per run, for jobs with fewer than three attempts whose last attempt was
+more than five minutes ago. After three attempts a job stays `failed` until someone calls `processing.reprocess`.
+Schedule `dr.maintain()` (or `npx better-files maintain --every 300`) for retries to happen.
+
+In `background` mode, a crash outside the job's own error handling is logged as `Better Files processing crashed` and
+nothing is recorded, so the version stays `pending`.
+
+## Events
+
+`version.processed` is published to `dr.events` subscribers after each attempt, with `nodeId`,
+`versionId`, `status`, `pdf` and `thumbnail`. The plugin writes nothing to the room's activity log.
+
+```ts
+dr.events.subscribe('version.processed', (event) => {
+  if (event.data.status === 'failed') alertOps(event.data.versionId);
+});
+```
+
+## Related
+
+- [Watermarking](/docs/plugins/watermark): stamped downloads, which use the PDF rendition
+- [Virus scanning](/docs/plugins/scan): quarantined versions wait for a clean scan
+- [Typed client](/docs/frameworks/client)

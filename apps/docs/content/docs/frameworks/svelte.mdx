@@ -1,0 +1,96 @@
+---
+title: Svelte
+metaTitle: Better Files for Svelte
+description: Typed Svelte stores for rooms, folders and documents, batched capabilities, uploads with progress and live rooms, with no runtime dependency.
+icon: Svelte
+packages:
+  - '@better-files/svelte'
+  - '@better-files/client'
+sources:
+  - packages/svelte/src/index.ts
+  - packages/client/src/cache.ts
+---
+
+`better-files/svelte` exposes the [typed client](/docs/frameworks/client) as Svelte stores. It implements the store
+contract itself, so it has no runtime dependency, not even on Svelte. Stores load when first subscribed and share one
+cache, so uploads and writes refresh every view. For the server side of a SvelteKit app, see
+[SvelteKit](/docs/frameworks/sveltekit).
+
+## Set up
+
+```ts title="src/lib/files.ts"
+import { createBetterFilesClient } from 'better-files/client';
+import { createBetterFilesSvelte } from 'better-files/svelte';
+import type { dr } from '$lib/server/better-files';
+
+const client = createBetterFilesClient<typeof dr>({ tenantId: () => getTenantId() });
+export const files = createBetterFilesSvelte<typeof dr>(client);
+```
+
+Pass `{ cache }` as the second argument to share a `QueryCache` with other code.
+
+## Reading
+
+```svelte title="src/routes/rooms/[roomId]/+page.svelte"
+<script lang="ts">
+  import { files } from '$lib/files';
+  export let data;
+
+  const index = files.roomIndex(data.roomId);
+</script>
+
+{#if $index.loading}
+  <p>Loading…</p>
+{:else}
+  {#each $index.data ?? [] as entry}
+    <p>{entry.index} {entry.name}</p>
+  {/each}
+{/if}
+```
+
+Each store holds `{ data, error, loading }` and has a `refresh()` method.
+
+| Store                                  | Calls                      |
+| -------------------------------------- | -------------------------- |
+| `files.rooms({ status? })`             | `rooms.list`               |
+| `files.room(roomId)`                   | `rooms.get`                |
+| `files.roomIndex(roomId)`              | `rooms.index`              |
+| `files.folder(nodeId)`                 | `folders.list`             |
+| `files.document(nodeId)`               | `documents.get`            |
+| `files.members(roomId)`                | `members.list`             |
+| `files.activity(roomId, { limit? })`   | `activity.list`            |
+| `files.capabilities(roomId, nodeIds)`  | `permissions.capabilities` |
+| `files.query(key, (client) => …)`      | anything else              |
+
+The capabilities store's value also has `can(nodeId, capability)`:
+
+```svelte
+<script lang="ts">
+  const caps = files.capabilities(roomId, items.map((item) => item.id));
+</script>
+
+{#if $caps.can(doc.id, 'DOWNLOAD_ORIGINAL')}<DownloadOriginalButton />{/if}
+```
+
+It only decides what to show. The server enforces access on every operation.
+
+## Uploads, writes and live rooms
+
+```ts
+// Progress for every upload started through files.uploads, a store of items: `const { uploads } = files;` then $uploads.
+await files.uploads.upload({ parentId: folderId, file });
+files.uploads.clear();
+
+// A write that refreshes folder and document views when it succeeds: $rename.pending, $rename.error.
+const rename = files.action(
+  (client, nodeId: string, name: string) => client.documents.rename({ nodeId, name }),
+  ['folder:', 'document:'],
+);
+await rename.run(doc.id, 'Lease (signed).pdf');
+
+// While subscribed, keeps the room's other stores live; the value is the latest activity entry.
+const latest = files.live(roomId);
+```
+
+`files.invalidate(prefix?)` drops cached results by key prefix. Stores with subscribers then fetch again. The keys
+are listed under [Query cache](/docs/frameworks/client#query-cache).

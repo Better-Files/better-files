@@ -1,0 +1,174 @@
+---
+title: Notifications
+description: Email room members about assignments, new documents and room openings, at once or batched into digests, with per-room preferences.
+metaTitle: Email notifications for data rooms
+icon: Inbox
+packages: ['@better-files/plugin-notifications']
+sources:
+  - packages/plugin-notifications/src/index.ts
+  - packages/plugin-notifications/README.md
+  - packages/plugin-tasks/src/index.ts
+  - packages/plugin-qa/src/index.ts
+  - packages/core/src/plugin.ts
+  - packages/server/src/index.ts
+  - packages/server/src/events.ts
+  - packages/server/src/endpoints/nodes.ts
+  - tests/plugins/analytics-notifications.test.ts
+---
+
+People in a deal room do not watch it all day. A buyer's analyst needs to hear that new documents were added, an
+expert needs to know a question was assigned to them, and someone with an overdue task needs a reminder. Too many
+emails get ignored, so routine room activity is better collected into one message.
+
+The notifications plugin listens to room events and emails the people they concern. Assignments go out at once; room
+activity waits in a queue and goes out as one digest per person and room. Each member can choose, per room, to get
+everything at once, as a digest, or not at all. Messages never name documents or quote their content: they say what
+happened and link back to the room, where permissions decide what the reader sees.
+
+```ts
+import { betterFiles } from 'better-files';
+import { betterFilesIamPlugin } from 'better-files/iam';
+import { notificationsPlugin } from 'better-files/plugin-notifications';
+import { qaPlugin } from 'better-files/plugin-qa';
+import { tasksPlugin } from 'better-files/plugin-tasks';
+
+const plugins = [
+  tasksPlugin(),
+  qaPlugin(),
+  notificationsPlugin({
+    mailer: {
+      async send(email) {
+        await smtp.sendMail({ to: email.to, subject: email.subject, text: email.text });
+      },
+    },
+    roomUrl: ({ roomId }) => `https://app.example.com/rooms/${roomId}`,
+    productName: 'Acme Deals',
+  }),
+] as const;
+const iamPlugin = betterFilesIamPlugin({ plugins }); // registers better-files:notifications:manage
+
+export const dr = betterFiles({ /* iam, database, storage, secret */ plugins });
+
+// Run on a schedule: sends the queued digests.
+await dr.maintain();
+```
+
+The plugin owns two tables, `notificationPreferences` and `pendingNotifications`. On a SQL database, run
+`better-files generate` and `better-files migrate` after adding it.
+
+## Options
+
+<TypeTable
+  type={{
+    mailer: {
+      type: '{ send(email: Email): Promise<void> }',
+      description: 'Delivers each message: an SMTP client, a provider API, or a Better IAM delivery callback.',
+      required: true,
+    },
+    resolveRecipient: {
+      type: '(input: { tenantId, identityId }) => Promise<Recipient|undefined>',
+      description: 'Looks up an email address when the room roster has none for the identity. Recipient is { identityId, email, name? }; a name found here is used in the greeting of instant messages.',
+    },
+    roomUrl: {
+      type: '(input: { tenantId, roomId }) => string',
+      description: 'The link at the end of each message. Without it, messages have no link.',
+    },
+    productName: {
+      type: 'string',
+      description: 'The first part of each subject.',
+      default: "'Data room'",
+    },
+  }}
+/>
+
+Each `Email` has `to`, `subject`, `text` (plain text) and `id`. The `id` is stable for the same message, so a mailer
+that retries can use it to avoid sending twice. The subject is the product name and the room name, such as
+`Acme Deals: Project Falcon`.
+
+## What is sent, and to whom
+
+| Event | Recipients | Line in the message | Default mode |
+| --- | --- | --- | --- |
+| `task.created` | the task's assignee | A task was assigned to you: *title* | instant |
+| `task.overdue` | the task's assignee | A task is overdue: *title* | instant |
+| `qa.assigned` | the question's assignee | A question was assigned to you | instant |
+| `document.uploaded` | every active room member | New documents were added | daily |
+| `version.created` | every active room member | Documents were updated | daily |
+| `room.published` | every active room member | The room is now open | daily |
+
+- The person who caused the event is never notified of it. Overdue reminders come from `dr.maintain()`, whose actor is
+  `system`, so the assignee always gets them.
+- Task and Q&A events come from the [tasks](/docs/plugins/tasks) and [Q&A](/docs/plugins/qa) plugins. Without them,
+  only the room events above are sent.
+- Room members are emailed at the address on their room membership. When a member has none, `resolveRecipient` is
+  asked; when it returns nothing, that person is skipped.
+- Room-wide events go to every active member, including members who cannot see the new document. This is safe
+  because the message names no document.
+- Other events, such as `qa.published` or `task.completed`, are not emailed. Subscribe to them with `dr.events` or a
+  [webhook](/docs/plugins/webhooks) to send your own messages.
+
+## Preferences
+
+Each person chooses one mode per room:
+
+- `instant`: every notification for the room is emailed as it happens.
+- `daily`: notifications are queued and sent in the next digest.
+- `off`: nothing from this room.
+
+Without a choice, assignments and overdue tasks are `instant` and room activity is `daily`. Once a person sets a mode,
+it applies to every event type in that room.
+
+`dr.api.notifications.setPreference(credential, { tenantId, roomId, mode })` sets the caller's own mode and returns
+`{ mode }`. It needs `better-files:notifications:manage`, which every room relation holds, and works on closed rooms.
+There is no endpoint to read the current mode back, so keep it in your settings screen state after saving.
+
+```tsx
+const save = useAction((client, mode: 'instant' | 'daily' | 'off') =>
+  client.notifications.setPreference({ roomId, mode }),
+);
+```
+
+## Digests
+
+Each `dr.maintain()` run sends one message per person and room with everything queued since the last digest, listing
+each distinct line once, then marks the queued items as sent. Sent items are deleted 30 days later. One run reads up
+to 5,000 queued items; the rest wait for the next run.
+
+<Callout type="warn" title="Digests go out on every maintenance run">
+  The plugin calls them daily digests, but it sends whatever is queued each time `dr.maintain()` runs. If you schedule
+  `dr.maintain()` every few minutes, as recommended for the rest of Better Files, members in `daily` mode get small
+  batches every few minutes rather than one email a day. The plugin has no option to send digests on a separate
+  schedule.
+</Callout>
+
+## Delivery and failures
+
+- **Instant messages** are sent from the event bus after the operation commits. If the mailer throws, the error is
+  logged and the message is not retried; the operation that caused it still succeeds.
+- **Digests** are sent from `dr.maintain()`. If the mailer throws, `dr.maintain()` rejects with that error, the items
+  of that batch and of later batches stay queued, and the next run tries again with the same message `id`. Batches
+  sent before the failure are already marked as sent. Plugins that run after this one in `dr.maintain()` are skipped
+  for that run.
+
+The plugin records nothing in the activity log and emits no events of its own.
+
+## Errors
+
+| Code | When |
+| --- | --- |
+| `INVALID_INPUT` | `mode` is not `instant`, `daily` or `off`. |
+| `FORBIDDEN` | Better IAM refuses `better-files:notifications:manage`, for example to someone without a room relation. |
+| `NOT_FOUND` | The room does not exist in the tenant. |
+
+## Limits
+
+- 5,000 queued digest items per `dr.maintain()` run.
+- Queued items that were sent are kept for 30 days.
+- Plain-text messages only; the subject and wording are fixed by the plugin, apart from `productName` and the link.
+
+## Related
+
+- [Tasks](/docs/plugins/tasks): assignments and overdue reminders.
+- [Q&A](/docs/plugins/qa): question assignments.
+- [Webhooks](/docs/plugins/webhooks): deliver any event to your own systems.
+- [Next.js](/docs/frameworks/nextjs#maintenance-on-vercel-and-similar-hosts): running `dr.maintain()` on a schedule.

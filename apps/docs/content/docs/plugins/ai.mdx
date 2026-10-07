@@ -1,0 +1,253 @@
+---
+title: AI answers
+description: Questions and summaries answered by Claude from the documents the asker may open, with citations checked against those documents.
+metaTitle: Permission-aware AI for data rooms
+icon: Sparkles
+packages: ['@better-files/plugin-ai']
+sources:
+  - packages/plugin-ai/src/index.ts
+  - packages/plugin-ai/src/claude.ts
+  - packages/plugin-ai/README.md
+  - packages/plugin-ai/package.json
+  - packages/plugin-search/src/index.ts
+  - packages/plugin-search/src/backend.ts
+  - packages/server/src/pipeline.ts
+  - tests/plugins/ai.test.ts
+  - tests/plugins/ai-adversarial.test.ts
+---
+
+People in a data room ask questions like "who can terminate the lease?" or "what is the change of control clause?".
+A language model can answer them from the documents, but in a data room it must only read what the person asking
+could open themselves, and its answer must point to the passages it relied on.
+
+The AI plugin answers questions over a room and summarizes documents with Claude, through the Anthropic SDK. It finds
+candidate documents through the [search plugin](/docs/plugins/search)'s index, checks each one against the asker's
+permissions before any text is read, and keeps only citations that quote a document the asker was given.
+
+```ts
+import { betterFiles } from 'better-files';
+import { betterFilesIamPlugin } from 'better-files/iam';
+import { searchPlugin } from 'better-files/plugin-search';
+import { aiPlugin, claudeProvider } from 'better-files/plugin-ai';
+
+const plugins = [
+  searchPlugin({ indexContent: true }), // retrieval reads the search index
+  aiPlugin({ provider: claudeProvider() }),
+] as const;
+const iamPlugin = betterFilesIamPlugin({ plugins }); // registers better-files:ai:query
+
+export const dr = betterFiles({ /* iam, database, storage, secret */ plugins });
+
+const result = await dr.api.ai.ask(credential, {
+  tenantId,
+  roomId,
+  question: 'Who can terminate the lease?',
+});
+// { answer, refused, citations: [{ nodeId, name, quote }], sources: [{ nodeId, name }] }
+```
+
+`claudeProvider()` creates an Anthropic client from the environment (`ANTHROPIC_API_KEY`). Install
+`@anthropic-ai/sdk`, an optional peer dependency of the plugin.
+
+<Callout type="warn" title="Document text leaves your servers">
+  Excerpts of the documents the asker may read are sent to the Anthropic API with each question. Check that this is
+  allowed for the rooms where you enable the plugin, and keep `requireCopyText` in mind for rooms where text must
+  never leave the viewer.
+</Callout>
+
+## Requirements
+
+- **The search plugin.** `aiPlugin` declares a dependency on it, and `betterFiles()` fails at startup without it.
+  Its backend must implement `texts()`; both `sqlSearchBackend()` and `meilisearchBackend()` do. Otherwise the
+  plugin throws `INVALID_INPUT` when the instance is built.
+- **`indexContent: true` on the search plugin.** The AI plugin reads document text from the index. Without it,
+  `ask` finds nothing to read and `summarize` fails with `NOT_FOUND`. Files indexed before you turned it on need a
+  [`search.reindex`](/docs/plugins/search#rebuild-a-rooms-index).
+
+## Options
+
+<TypeTable
+  type={{
+    provider: {
+      type: 'AiProvider',
+      description: 'The model behind the plugin. claudeProvider() is the included implementation.',
+      required: true,
+    },
+    maxSources: { type: 'number', description: 'Documents sent per question.', default: '8' },
+    maxCharsPerSource: {
+      type: 'number',
+      description: 'Characters of each document sent with a question. Summaries send up to four times this.',
+      default: '20000',
+    },
+    requireCopyText: {
+      type: 'boolean',
+      description: 'Require COPY_TEXT on every document the model reads, not only on view-only and no-copy documents.',
+      default: 'false',
+    },
+  }}
+/>
+
+### `claudeProvider` options
+
+<TypeTable
+  type={{
+    client: {
+      type: 'Anthropic',
+      description: 'An Anthropic client. By default one is created from the environment (ANTHROPIC_API_KEY or ant auth login).',
+    },
+    model: { type: 'string', description: 'The Claude model id.', default: "'claude-opus-5'" },
+    effort: {
+      type: "'low' | 'medium' | 'high' | 'xhigh' | 'max'",
+      description: 'Thinking effort. The provider uses adaptive thinking.',
+      default: "'medium'",
+    },
+    fallbacks: {
+      type: 'boolean',
+      description: 'Server-side refusal fallbacks: if the model declines, the API re-runs the request on a fallback model within the same call. false turns them off.',
+      default: 'true',
+    },
+    maxTokens: { type: 'number', description: 'The response token limit.', default: '16000' },
+  }}
+/>
+
+Each request sends the documents as citable document blocks (citations enabled), with a system prompt that tells
+the model to use only the documents given, to say so when they do not contain the answer, and to treat instructions
+found inside documents as content, never as instructions. The last document block is marked for prompt caching, so
+follow-up questions over the same excerpts cost less. A response that stops with a refusal comes back as
+`refused: true`.
+
+## Ask a question
+
+`ai.ask` takes `roomId` and `question` (3 to 2,000 characters). It works like this:
+
+1. **Keywords.** The question is lower-cased and split into words. Words of one or two letters and common English
+   stopwords are dropped, and the six longest words are kept.
+2. **Candidates.** The search index is queried for documents matching any of the keywords (up to 200 candidates).
+3. **Permission check.** Each candidate is checked against Better Files' own tables (see below). Text is fetched only
+   for documents that pass.
+4. **Excerpts.** The best `maxSources` documents with text are sent. A document longer than `maxCharsPerSource` is
+   cut down to the passages around the keywords.
+5. **Answer.** The provider answers, and the plugin keeps only valid citations.
+
+The result:
+
+<TypeTable
+  type={{
+    answer: { type: 'string', description: 'The answer text.' },
+    refused: { type: 'boolean', description: 'The model declined to answer.' },
+    citations: {
+      type: '{ nodeId: string; name: string; quote: string }[]',
+      description: 'Passages the answer relies on, each from a document in sources.',
+    },
+    sources: {
+      type: '{ nodeId: string; name: string }[]',
+      description: 'The documents sent to the model.',
+    },
+  }}
+/>
+
+When no document the asker may read matches, the model is not called. `ask` returns the answer "None of the
+documents you can view in this room address this question." with empty `citations` and `sources`.
+
+## Summarize a document
+
+```ts
+const { summary, refused, citations } = await dr.api.ai.summarize(credential, {
+  tenantId,
+  nodeId,
+  instructions: 'List the termination rights and notice periods.', // optional, up to 1,000 characters
+});
+```
+
+Without `instructions`, the model is asked for a concise summary for a deal professional: purpose, parties, key
+terms, dates, amounts and risks. Up to four times `maxCharsPerSource` characters of the document's indexed text are
+sent (80,000 by default). `citations` is a list of quotes, each one checked to appear in the document.
+
+In the browser both endpoints are on the client, without `tenantId` when the client was created with one:
+
+```ts
+import { createBetterFilesClient } from 'better-files/client';
+
+const files = createBetterFilesClient<typeof dr>({ tenantId });
+const result = await files.ai.ask({ roomId, question: 'What is the purchase price?' });
+```
+
+Over HTTP they are `POST /api/better-files/ai/ask` and `POST /api/better-files/ai/summarize`.
+
+## What the model can and cannot see
+
+Both endpoints are authorized as `better-files:ai:query`, which the plugin's access model gives to every room
+relation (`owner`, `admin`, `publisher`, `editor`, `contributor`, `viewer`, `auditor`). They also work on closed
+rooms. `summarize` additionally needs `VIEW` on the document.
+
+Before any text is read from the index, each candidate document must:
+
+- belong to the same tenant and the room asked about, and be a document;
+- not be in the trash;
+- give the asker `VIEW`, after the permission matrix, room settings, document flags and plugins are applied;
+- give the asker `COPY_TEXT` too, when the document is flagged view-only or no-copy, or for every document when
+  `requireCopyText` is on.
+
+These checks run at question time, so documents that were moved, trashed or hidden after they were indexed never
+reach the model. A view-only document is left out of `ask` without an error; `summarize` on one fails with
+`FORBIDDEN`.
+
+Citations are filtered too. The plugin keeps a citation only when it names a document that was sent for this
+request and its quote appears in the text that was sent (compared after folding case and whitespace). A misbehaving
+provider, or a document with injected instructions, cannot attribute words to a document the asker never saw.
+
+## A provider of your own
+
+`provider` is any object with two methods:
+
+```ts
+import type { AiProvider } from 'better-files/plugin-ai';
+
+const provider: AiProvider = {
+  async answer({ question, sources }) {
+    // sources: [{ id, title, text }]
+    return { text: '…', citations: [{ sourceId: sources[0]!.id, quote: '…' }], refused: false };
+  },
+  async summarize({ source, instructions }) {
+    return { text: '…', citations: [], refused: false };
+  },
+};
+```
+
+Each method returns an `AiAnswer`: `text`, `citations` (`{ sourceId, quote }[]`, where `sourceId` is the `id` of a
+source you were given), `refused`, and optionally `model`. The same citation filtering applies to your provider.
+
+## Activity
+
+| Activity entry | When | Metadata |
+| --- | --- | --- |
+| `ai.asked` | the model answered a question | the first 300 characters of the question, the source document ids, `refused` |
+| `ai.summarized` | the model summarized a document (with its `nodeId`) | `refused` |
+
+The entries go to the room's activity log; they are not published as events. A question that matched no readable
+document is not recorded, because the model was not called.
+
+## Errors
+
+| Code | When |
+| --- | --- |
+| `INVALID_INPUT` | the question is shorter than 3 or longer than 2,000 characters; `summarize` on a folder; the search backend has no `texts()` |
+| `FORBIDDEN` | the caller lacks `better-files:ai:query` or `VIEW`; `summarize` on a view-only or no-copy document without `COPY_TEXT` |
+| `NOT_FOUND` | `summarize` on a document with no indexed text (turn on `indexContent`) |
+
+Errors from the Anthropic API are passed through unchanged.
+
+## Limits
+
+- Retrieval is keyword based: it finds documents that share words with the question, not documents with the same
+  meaning in other words.
+- One room per question, and at most `maxSources` documents per answer.
+- Only text the search plugin extracted can be read: scanned images without a text layer are invisible to the
+  model.
+- Answers are not streamed to the caller; the endpoint returns once the model has finished.
+
+## Related
+
+- [Search](/docs/plugins/search): the index the AI plugin reads.
+- [Audit reports](/docs/plugins/audit): participants, access by folder, and engagement for a room.
+- [Better IAM integration](/docs/guides/better-iam)

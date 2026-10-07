@@ -1,0 +1,79 @@
+{
+  "name": "@better-files/middleware",
+  "version": "0.1.0",
+  "description": "Framework integrations for Better Files: Express, Hono, Fastify, Koa, React Router, h3 and framework-neutral request helpers.",
+  "type": "module",
+  "license": "Apache-2.0",
+  "author": "Better Files contributors",
+  "homepage": "https://github.com/Better-Files/better-files/tree/main/packages/middleware#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Better-Files/better-files.git",
+    "directory": "packages/middleware"
+  },
+  "bugs": {
+    "url": "https://github.com/Better-Files/better-files/issues"
+  },
+  "keywords": [
+    "data-room",
+    "better-iam",
+    "typescript",
+    "express",
+    "hono",
+    "fastify",
+    "koa",
+    "react-router",
+    "remix",
+    "middleware"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./express": {
+      "types": "./dist/express.d.ts",
+      "import": "./dist/express.js"
+    },
+    "./hono": {
+      "types": "./dist/hono.d.ts",
+      "import": "./dist/hono.js"
+    },
+    "./fastify": {
+      "types": "./dist/fastify.d.ts",
+      "import": "./dist/fastify.js"
+    },
+    "./h3": {
+      "types": "./dist/h3.d.ts",
+      "import": "./dist/h3.js"
+    },
+    "./koa": {
+      "types": "./dist/koa.d.ts",
+      "import": "./dist/koa.js"
+    },
+    "./react-router": {
+      "types": "./dist/react-router.d.ts",
+      "import": "./dist/react-router.js"
+    }
+  },
+  "sideEffects": false,
+  "scripts": {
+    "build": "tsc -b"
+  },
+  "dependencies": {
+    "@better-files/core": "workspace:*"
+  }
+}

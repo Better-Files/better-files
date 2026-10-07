@@ -1,0 +1,182 @@
+---
+title: Storage
+description: Where Better Files keeps file bytes, the StorageAdapter port every backend implements, and how to choose an adapter.
+metaTitle: File storage adapters
+icon: HardDrive
+packages: ['@better-files/core']
+sources:
+  - packages/core/src/ports.ts
+  - packages/core/src/tables.ts
+  - packages/core/src/conformance.ts
+  - packages/server/src/files.ts
+  - packages/server/src/endpoints/nodes.ts
+  - packages/storage-s3/src/index.ts
+  - packages/storage-fs/src/index.ts
+  - packages/storage-gcs/src/index.ts
+  - packages/storage-azure/src/index.ts
+  - packages/storage-regional/src/index.ts
+  - packages/storage-cluster/src/index.ts
+---
+
+Better Files keeps two kinds of data apart. Rooms, folders, permissions and the activity log live in your
+[database](/docs/operations/databases). The bytes of uploaded files live in object storage: a bucket, a container, a
+directory, or your own servers' disks. The `storage` option of `betterFiles()` takes one **storage adapter**, an object
+that puts, reads and deletes those bytes.
+
+```ts
+import { betterFiles } from 'better-files';
+import { s3Storage } from 'better-files/storage-s3';
+
+export const dr = betterFiles({
+  // iam, database, secret, plugins …
+  storage: s3Storage({ bucket: 'rooms', region: 'eu-west-1' }),
+});
+```
+
+`betterFiles()` refuses to start without one (`betterFiles() needs a storage adapter`).
+
+## What is stored
+
+Every file Better Files writes is a **blob**: a document version, a rendition (a PDF or page images made from a
+version), or a file a plugin produces, such as a signed PDF. Each blob is one object in storage.
+
+- **Ciphertext only.** With encryption on (the default), the server encrypts the bytes before they reach the adapter,
+  in 64 KiB segments that each carry a 16-byte tag. The adapter never sees plaintext, and an object is 16 bytes per
+  segment larger than the file. See [Encryption](/docs/operations/encryption).
+- **No keys in storage.** The data key of a blob is stored wrapped, on its row in the `blobs` table, next to the
+  storage key and the format parameters. A copy of the bucket alone cannot be decrypted.
+- **Opaque keys.** Storage keys look like `t/{hash}/r/{hash}/{blobId}`: the tenant and room ids are hashed (the first
+  24 hex characters of their SHA-256), so object names never contain them. A room with a
+  [data-residency region](/docs/operations/storage/regional) gets the prefix `g/{region}/` in front.
+- **One writer per key.** Every upload gets a fresh blob and so a fresh key. Better Files never overwrites a stored
+  object in place.
+
+Deleting a room deletes its blobs from storage, and permanently deleting a document deletes the blobs of its
+versions and renditions.
+
+## The StorageAdapter port
+
+An adapter implements this interface, exported as a type from `better-files` and `@better-files/core`:
+
+```ts
+type ByteSource = Uint8Array | ReadableStream<Uint8Array> | AsyncIterable<Uint8Array>;
+
+interface StoredObject {
+  key: string;
+  size: number;
+  etag?: string;
+}
+
+interface StorageAdapter {
+  readonly id: string;
+  put(key: string, body: ByteSource, options?: { contentLength?: number }): Promise<StoredObject>;
+  /** `range.end` is inclusive, as in HTTP Range. */
+  get(key: string, range?: { start: number; end?: number }): Promise<ReadableStream<Uint8Array>>;
+  head(key: string): Promise<StoredObject | null>;
+  delete(key: string): Promise<void>;
+  copy?(from: string, to: string): Promise<StoredObject>;
+  multipart?: MultipartStorage;
+  presign?(
+    key: string,
+    options: { method: 'GET' | 'PUT'; expiresInSeconds: number; contentType?: string },
+  ): Promise<string>;
+  readonly residency?: StorageResidency;
+}
+```
+
+- `put` receives the stored size as `contentLength` whenever Better Files writes, so adapters can stream to services
+  that require a length up front.
+- `get` with a range serves HTTP range requests and viewer pages. The server maps the plaintext range to the
+  encrypted segments it needs and asks the adapter for only those bytes.
+- `head` returns `null` for a missing object. The server uses it to check that a finished upload has the expected
+  stored size.
+- `delete` of a missing object is not an error.
+- `residency` is set only by [`regionalStorage`](/docs/operations/storage/regional).
+
+### Multipart uploads
+
+Files larger than one part (`limits.partSize`, 8 MiB by default) are uploaded in parts when the adapter has
+`multipart`:
+
+```ts
+interface MultipartStorage {
+  create(key: string): Promise<{ uploadId: string }>;
+  uploadPart(key: string, uploadId: string, part: number, body: ByteSource): Promise<{ etag: string }>;
+  complete(key: string, uploadId: string, parts: { part: number; etag: string }[]): Promise<StoredObject>;
+  abort(key: string, uploadId: string): Promise<void>;
+  /** A URL a client can PUT one part to directly (direct uploads). Optional. */
+  presignPart?(key: string, uploadId: string, part: number, options: { expiresInSeconds: number }): Promise<string>;
+}
+```
+
+The server encrypts each part on its own, so parts can arrive in any order and be retried. `limits.partSize` must be a
+positive multiple of 64 KiB; S3 also needs at least 5 MiB for every part but the last. Without `multipart`, uploads
+send the whole file in one request.
+
+### Direct uploads
+
+With `presignPart`, a browser can send the parts straight to storage instead of through your server, which suits
+serverless hosts with small request limits. The client asks for `uploads.create` with `direct: true` and gets one
+presigned URL per part plus the parameters to encrypt that one file in the browser. When it completes, the server
+reads the whole object back and accepts it only if every segment decrypts. An adapter without `presignPart` answers
+`direct: true` with `UNSUPPORTED`.
+
+The storage service must accept cross-origin `PUT` requests from your app and expose the response's `ETag` header.
+Each adapter page lists the rules it needs.
+
+## Choosing an adapter
+
+| Adapter | Package | Backend | Multipart | Direct uploads |
+| --- | --- | --- | --- | --- |
+| `s3Storage` | `better-files/storage-s3` | AWS S3, Cloudflare R2, MinIO, Backblaze B2, Wasabi | yes | yes |
+| `gcsStorage` | `better-files/storage-gcs` | Google Cloud Storage | yes (compose) | with a service-account key |
+| `azureBlobStorage` | `better-files/storage-azure` | Azure Blob Storage (block blobs) | yes (blocks) | with an account key |
+| `fileStorage` | `better-files/storage-fs` | a local directory | yes | no |
+| `regionalStorage` | `better-files/storage-regional` | one adapter per region, routed per room | when every region has it | when every region has it |
+| `storageCluster` | `better-files/storage-cluster` | your servers' disks, replicated | yes | yes (node CORS) |
+
+None of them uses a cloud SDK: they talk to each service over `fetch` and sign requests themselves.
+
+For tests, `memoryStorage()` from `better-files/testing` keeps objects in memory.
+
+## Writing your own adapter
+
+Implement `StorageAdapter` and run the shared conformance cases against it. Each case gets an empty store:
+
+```ts
+import { describe, it } from 'vitest';
+import { storageConformanceCases } from 'better-files/core/conformance';
+
+describe('my storage', () => {
+  for (const testCase of storageConformanceCases())
+    it(testCase.name, () => testCase.run(myStorage()));
+});
+```
+
+`better-files doctor` also writes, reads back and deletes one object through the configured adapter.
+
+## Storage pages
+
+<Cards>
+  <Card title="S3 and compatible" href="/docs/operations/storage/s3">
+    S3, R2, MinIO, B2 and Wasabi over SigV4, with direct uploads.
+  </Card>
+  <Card title="Local disk" href="/docs/operations/storage/filesystem">
+    fileStorage for development, single servers and on-premises installs.
+  </Card>
+  <Card title="GCS and Azure" href="/docs/operations/storage/gcs-and-azure">
+    Google Cloud Storage and Azure Blob Storage.
+  </Card>
+  <Card title="Data residency" href="/docs/operations/storage/regional">
+    Keep each room's files in its region, and move rooms between regions.
+  </Card>
+  <Card title="Storage cluster" href="/docs/operations/storage/cluster">
+    Your own servers as replicated storage, with repair, drain and scrub.
+  </Card>
+</Cards>
+
+## Related
+
+- [Encryption](/docs/operations/encryption)
+- [Uploads and downloads](/docs/guides/concepts/uploads-and-downloads)
+- [Maintenance and jobs](/docs/operations/maintenance-and-jobs)

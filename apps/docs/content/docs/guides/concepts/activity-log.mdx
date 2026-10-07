@@ -1,0 +1,223 @@
+---
+title: Activity log
+description: The per-room, hash-chained record of who did what, how to read and verify it, and which events also go to Better IAM's audit chain.
+metaTitle: The hash-chained activity log
+icon: ScrollText
+packages: ['@better-files/server', '@better-files/cli']
+sources:
+  - packages/server/src/activity.ts
+  - packages/server/src/engine.ts
+  - packages/server/src/pipeline.ts
+  - packages/server/src/files.ts
+  - packages/server/src/index.ts
+  - packages/server/src/endpoints/permissions.ts
+  - packages/server/src/endpoints/rooms.ts
+  - packages/server/src/endpoints/nodes.ts
+  - packages/server/src/endpoints/people.ts
+  - packages/core/src/tables.ts
+  - packages/core/src/operations.ts
+  - packages/iam/src/index.ts
+  - packages/cli/src/cli.ts
+  - packages/plugin-audit/src/index.ts
+---
+
+After a deal closes, or when a dispute starts, someone asks: who opened the financials, who downloaded the original
+of the share purchase agreement, and when was the buyer's adviser given access? The answer has to be complete, and
+it has to be believable: a log anyone with database access could quietly edit proves little.
+
+Every room has an **activity log**: an append-only list of records, one per action, numbered without gaps. Each
+record carries the SHA-256 hash of its own content and the hash of the record before it, so changing, deleting or
+reordering any record breaks the chain from that point on.
+
+```ts
+// The latest 50 records, newest first.
+const records = await dr.api.activity.list(credential, { tenantId, roomId, limit: 50 });
+
+// Recompute every hash and link.
+const chain = await dr.api.activity.verify(credential, { tenantId, roomId });
+// { valid: true, records: 1342, head: '9f2c…' }
+```
+
+## What is recorded
+
+Core operations record these actions; plugins add their own (`nda.accepted`, `audit.reported`, and so on).
+
+| Area | Actions |
+| --- | --- |
+| Room | `room.created`, `room.updated`, `room.published`, `room.closed`, `room.reopened`, `room.archived`, `room.exported` |
+| Content | `folder.created`, `document.uploaded`, `version.created`, `version.restored`, `folder.renamed`, `document.renamed`, `folder.moved`, `document.moved`, `folder.deleted`, `document.deleted`, `folder.restored`, `document.restored`, `document.flags-changed` |
+| Access to content | `document.viewed`, `document.downloaded`, `folder.downloaded` |
+| People | `member.invited`, `member.removed`, `member.role-changed`, `member.suspended`, `member.resumed`, `member.expired`, `group.created`, `group.updated`, `group.deleted`, `group.members-added`, `group.members-removed` |
+| Permissions | `permissions.changed` |
+
+Views and downloads are recorded when the ticket is issued, with the variant (`view`, `watermarked`, `original`)
+and the version in `metadata`. Uploads record the filename, size, version number and SHA-256.
+
+For operations that change data, the record is written inside the operation's transaction: a change that fails
+leaves no record, and one that commits always has one. Plugins append records the same way, with
+`context.activity`.
+
+## Record fields
+
+<TypeTable
+  type={{
+    id: { type: 'string', description: 'The record id. Not part of the hash.' },
+    roomId: { type: 'string', description: 'The room the chain belongs to.' },
+    sequence: { type: 'number', description: 'Position in the room chain, from 1, without gaps.' },
+    actorId: { type: 'string', description: 'Who acted: an identity id, or system for scheduled work.' },
+    action: { type: 'string', description: 'What happened, such as document.downloaded.' },
+    nodeId: { type: 'string', description: 'The folder or document it concerned, when there is one.' },
+    metadata: { type: 'Record of string to unknown', description: 'Details of the action: names, versions, variants, changes.' },
+    ip: { type: 'string', description: 'The client address, when the request carried one.' },
+    userAgent: { type: 'string', description: 'The client user agent, cut to 512 characters.' },
+    previousHash: { type: 'string', description: 'The hash of the record before; absent on the first record.' },
+    hash: { type: 'string', description: 'SHA-256 (hex) of this record, previousHash included.' },
+    createdAt: { type: 'number', description: 'When it happened (epoch milliseconds).' },
+  }}
+/>
+
+Records are stored with their `tenantId`, which is part of the hash; `activity.list` and exports leave it out.
+
+The client address comes from the framework adapter, or from `X-Forwarded-For` when you set `trustProxy: true`.
+Set that only behind a proxy you control.
+
+## How the chain works
+
+Appending a record happens in one transaction:
+
+1. The room's `activitySequence` counter is incremented. That row lock makes concurrent writers to the same room
+   wait for each other, so sequences have no gaps and no duplicates.
+2. The new record takes the room's current `activityHash` as its `previousHash`.
+3. Its `hash` is the SHA-256 of `canonicalJson(record)`, computed over every field except `id` and `hash`.
+4. The room's `activityHash` becomes the new hash: the room always points at the head of its chain.
+
+`canonicalJson` writes JSON with object keys sorted at every level and undefined values dropped, so the same record
+hashes the same way in any language or database. Both functions are exported:
+
+```ts
+import { activityHash, canonicalJson } from 'better-files/server';
+```
+
+## Read the log
+
+`activity.list` needs `better-files:activity:read` on the room, which the access model gives to owners,
+administrators and auditors. It also works on closed and archived rooms.
+
+<TypeTable
+  type={{
+    roomId: { type: 'string', description: 'The room.', required: true },
+    before: { type: 'number', description: 'Only records with a lower sequence: pass the last sequence you received to page back.' },
+    limit: { type: 'number', description: 'Records per page, 1 to 500.', default: '100' },
+    nodeId: { type: 'string', description: 'Only records about this folder or document.' },
+    actorId: { type: 'string', description: 'Only records by this person.' },
+  }}
+/>
+
+Records come newest first. To follow a room as it changes, use the live stream instead; see
+[Events and live updates](/docs/guides/concepts/events-and-live).
+
+## Verify the chain
+
+`activity.verify({ roomId })` (same action as `activity.list`) and `dr.verifyActivity({ tenantId, roomId })` (no
+credential, for your own jobs) recompute the whole chain, 500 records at a time. They check that sequences run 1, 2,
+3 without gaps, that each `previousHash` is the hash before it, that each hash matches the record's content, and
+that the room's head is the last record, which catches a deleted tail.
+
+They return a `ChainVerification`:
+
+<TypeTable
+  type={{
+    valid: { type: 'boolean', description: 'Whether every check passed.' },
+    records: { type: 'number', description: 'How many records verified before the first failure (all of them when valid).' },
+    head: { type: 'string', description: 'The hash of the last record that verified.' },
+    brokenAt: { type: 'number', description: 'The first sequence whose record or link does not verify; absent when valid.' },
+  }}
+/>
+
+A valid chain proves the records were not changed after they were written. It cannot prove that someone with
+database access did not rewrite the whole chain and the room's head together. To make that detectable, keep the
+`head` somewhere else from time to time: in an export, a ticketing system, or Better IAM's audit chain.
+
+### From the command line
+
+```sh
+npx better-files verify --tenant org_123 --room room_456
+```
+
+The CLI loads your instance from `better-files.config.ts` (or `--config <file>`), prints the `ChainVerification`
+as JSON, and exits with `0` when the chain is valid, `2` when it is broken and `1` on errors, so a scheduled job can
+alert on it. See [CLI](/docs/operations/cli).
+
+## Export the log
+
+There is no separate export call: the log travels with the room. `rooms.export` builds a ZIP of what the caller may
+take, and when they also hold `better-files:activity:export` (owners, administrators and auditors), it adds:
+
+- `activity.jsonl`: every record in sequence order, one JSON object per line, without `tenantId`;
+- an `activity` entry in `manifest.json`: the `ChainVerification` computed when the archive was built, with its
+  `head`.
+
+The [audit plugin](/docs/plugins/audit) turns the same data into a report (JSON or PDF) that states whether the chain
+is intact.
+
+### Verify an exported chain
+
+An exported chain can be checked without Better Files' database: recompute each hash from the record, add back the
+`tenantId` the export leaves out, and follow the links.
+
+```ts
+import { readFile } from 'node:fs/promises';
+import { activityHash } from 'better-files/server';
+
+const tenantId = 'org_123'; // the room's tenant
+const manifest = JSON.parse(await readFile('export/manifest.json', 'utf8'));
+const lines = (await readFile('export/activity.jsonl', 'utf8')).split('\n').filter(Boolean);
+
+let previous: string | undefined;
+let expected = 1;
+for (const line of lines) {
+  const record = JSON.parse(line);
+  const intact =
+    record.sequence === expected &&
+    record.previousHash === previous &&
+    activityHash({ ...record, tenantId }) === record.hash;
+  if (!intact) throw new Error(`The chain breaks at sequence ${record.sequence}`);
+  previous = record.hash;
+  expected++;
+}
+if (previous !== manifest.activity.head) throw new Error('The log does not end at the exported head');
+```
+
+Without Better Files at hand, the same check is SHA-256 over JSON with sorted keys. Compare the final hash with a
+head you kept elsewhere to show that nothing was rewritten since.
+
+## Security events in Better IAM
+
+Some actions also matter outside the room: to your security team, and in Better IAM's own tamper-evident audit
+chain. After the operation commits, these are recorded there too:
+
+| Better IAM audit action | When |
+| --- | --- |
+| `better-files:room.created`, `better-files:room.deleted` | A room is created or deleted. |
+| `better-files:room.published`, `better-files:room.closed`, `better-files:room.reopened`, `better-files:room.archived` | The room's status changes. |
+| `better-files:room.settings-changed` | `rooms.update` changes settings. |
+| `better-files:room.exported` | A room export is prepared. |
+| `better-files:member.invited`, `better-files:member.removed`, `better-files:member.role-changed`, `better-files:member.suspended` | Room membership changes. |
+| `better-files:permissions.changed` | Permission entries change on a folder or document. |
+| `better-files:document.flags-changed` | A document's view-only, no-print or no-copy flags change. |
+| `better-files:documents:download-original` | Someone takes an original, alone or in a ZIP. |
+
+Each audit record names the actor, the resource (`better-files-room/{id}`, `better-files-folder/{id}` or
+`better-files-document/{id}`) and the outcome. `room.deleted` matters most here: deleting a room deletes its
+activity log with it, and the Better IAM record is what remains.
+
+`betterIamIntegration(iam)` records these by default. It needs a Better IAM build with the audit chain
+(`betterIamFeatures(iam).audit`); pass `audit: false` to turn it off. See
+[Keys and audit](/docs/guides/better-iam/keys-and-audit).
+
+## Related
+
+- [Events and live updates](/docs/guides/concepts/events-and-live): the same records as a live stream.
+- [Audit plugin](/docs/plugins/audit): audit reports with the chain status.
+- [Rooms and content](/docs/guides/concepts/rooms-and-content): room exports.
+- [Keys and audit](/docs/guides/better-iam/keys-and-audit)

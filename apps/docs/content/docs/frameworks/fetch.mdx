@@ -1,0 +1,171 @@
+---
+title: Fetch runtimes
+metaTitle: Better Files on Bun, Deno and fetch runtimes
+description: Serve the protocol with dr.handler on Bun, Deno and other fetch runtimes, and guard your own routes with the framework-neutral helpers.
+icon: Globe
+packages:
+  - '@better-files/server'
+  - '@better-files/middleware'
+sources:
+  - packages/server/src/http.ts
+  - packages/server/src/index.ts
+  - packages/middleware/src/index.ts
+  - packages/middleware/src/react-router.ts
+  - packages/crypto/src/index.ts
+  - README.md
+---
+
+`dr.handler` is a fetch handler: it takes a web `Request` and returns a `Response`. Any runtime or framework that
+gives you a `Request` can serve the Better Files protocol with it, without an adapter. For your own routes,
+`better-files/middleware` has three framework-neutral helpers.
+
+```ts title="server.ts (Bun)"
+import { dr } from './better-files';
+
+await dr.initialize();
+
+Bun.serve({
+  port: 3000,
+  fetch(request, server) {
+    if (new URL(request.url).pathname.startsWith('/api/better-files/'))
+      return dr.handler(request, { ip: server.requestIP(request)?.address });
+    return app(request); // the rest of your app
+  },
+});
+```
+
+## dr.handler(request, info?)
+
+`dr.handler` answers every path under `basePath` (`/api/better-files` by default) and returns a JSON 404 for any
+other path, so route only protocol requests to it. Pass the raw `Request`, before anything reads its body: uploads
+are streamed from it.
+
+`info.ip` is the client address. Better Files records it in the activity log and on download tickets, and plugins such
+as [network rules](/docs/plugins/network) decide with it. Fetch runtimes do not put the address on the `Request`, so
+read it from the runtime and pass it. An `ip` you pass wins over `X-Forwarded-For`, which is only read when you pass
+none and set `trustProxy: true` on `betterFiles()`.
+
+<Tabs items={['Bun', 'Deno', 'Workers', 'React Router']}>
+<Tab value="Bun">
+
+```ts
+Bun.serve({
+  fetch: (request, server) => dr.handler(request, { ip: server.requestIP(request)?.address }),
+});
+```
+
+</Tab>
+<Tab value="Deno">
+
+```ts
+Deno.serve((request, info) => dr.handler(request, { ip: info.remoteAddr.hostname }));
+```
+
+</Tab>
+<Tab value="Workers">
+
+```ts
+export default {
+  fetch: (request: Request) =>
+    dr.handler(request, { ip: request.headers.get('cf-connecting-ip') ?? undefined }),
+};
+```
+
+</Tab>
+<Tab value="React Router">
+
+```ts title="app/routes/api.better-files.$.ts"
+import type { LoaderFunctionArgs } from 'react-router';
+import { dr } from '~/better-files.server';
+
+export const loader = ({ request }: LoaderFunctionArgs) => dr.handler(request);
+export const action = loader;
+```
+
+For guarded loaders and actions, use [`createBetterFilesRouter`](/docs/frameworks/react-router) instead.
+
+</Tab>
+</Tabs>
+
+<Callout type="warn" title="Node built-ins">
+  Better Files' encryption imports `node:crypto` and its HTTP layer imports `node:stream`. Bun and Deno provide both;
+  on a worker runtime, turn on its Node.js compatibility. Your database and storage adapters must also work on the
+  runtime.
+</Callout>
+
+The handler applies the same rules on every runtime: operations need the `x-better-files: 1` header, cookie-bearing
+requests must come from the page's own origin or `trustedOrigins`, and JSON bodies are limited to 64 KiB. See
+[deployment](/docs/operations/deployment#csrf-protection-and-trusted-origins).
+
+## Your own routes
+
+`better-files/middleware` exports the helpers the framework integrations are built from. They take a `betterFiles()`
+instance and a `Credential`: `{ headers }` (cookies and the bearer token are read from them) or `{ token }`.
+
+```ts
+import { bindApi, errorResponse, requireCapabilities } from 'better-files/middleware';
+
+async function documentPage(request: Request, params: { roomId: string; nodeId: string }) {
+  const credential = { headers: request.headers };
+  const tenantId = await tenantOf(request); // however your app knows the tenant
+  try {
+    await requireCapabilities(dr, credential, { tenantId, ...params, capabilities: ['VIEW'] });
+    const document = await bindApi(dr, credential).documents.get({ tenantId, nodeId: params.nodeId });
+    return Response.json(document);
+  } catch (error) {
+    const { status, body } = errorResponse(error);
+    if (status === 500) throw error;
+    return Response.json(body, { status });
+  }
+}
+```
+
+### bindApi(dr, credential)
+
+Returns `dr.api` with the credential already applied, so `api.rooms.list({ tenantId })` stands for
+`dr.api.rooms.list(credential, { tenantId })`. Types follow your instance, plugin endpoints included.
+
+### requireCapabilities(dr, credential, requirement)
+
+Checks the permission matrix (layer A) on one node before your handler runs.
+
+<TypeTable
+  type={{
+    tenantId: { type: 'string', description: 'The tenant.', required: true },
+    roomId: { type: 'string', description: 'The room the node is in.', required: true },
+    nodeId: { type: 'string', description: 'The folder or document.', required: true },
+    capabilities: {
+      type: 'readonly string[]',
+      description: 'Every one must be held: VIEW, DOWNLOAD_ORIGINAL, MANAGE, or a plugin capability.',
+      required: true,
+    },
+  }}
+/>
+
+It resolves with every capability name the caller holds on the node. A node the caller cannot list throws
+`NOT_FOUND`, so its existence is not confirmed; a missing capability throws `FORBIDDEN`. The Better Files operations
+you call afterwards still check both layers themselves, so this guards your own pages and handlers, not the
+protocol.
+
+### errorResponse(error)
+
+Turns any error into `{ status, body }`, with `body` in the protocol's envelope, `{ error: { code, message } }`. Better
+Files errors keep their status (401, 403, 404, 409, …), and so do Better IAM errors below 500. Everything else becomes
+500 `INTERNAL_ERROR` with a generic message, so rethrow or log those yourself.
+
+### toHeaders(headers)
+
+Converts Node's `IncomingHttpHeaders` (or a plain record) into fetch `Headers`, for building a `{ headers }`
+credential outside a fetch runtime.
+
+## Maintenance
+
+Schedule `dr.maintain()` from your platform's scheduler (a cron trigger, a scheduled function) or from one
+long-running process. See [maintenance and jobs](/docs/operations/maintenance-and-jobs).
+
+## Related
+
+- [Deployment](/docs/operations/deployment)
+- [React Router and Remix](/docs/frameworks/react-router)
+- [Hono](/docs/frameworks/hono)
+- [Browser client](/docs/frameworks/client)

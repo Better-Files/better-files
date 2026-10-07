@@ -1,0 +1,139 @@
+---
+title: FAQ
+description: Short answers about hosting, Better IAM, storage, encryption, databases, serverless, guests, file sizes, frameworks, UI and license.
+icon: Signpost
+packages: ['better-files']
+sources:
+  - README.md
+  - PLAN.md
+  - packages/better-files/package.json
+  - packages/core/src/ports.ts
+  - packages/testing/src/index.ts
+  - packages/iam/src/index.ts
+  - packages/server/src/index.ts
+  - packages/server/src/options.ts
+  - packages/server/src/engine.ts
+  - packages/server/src/jobs.ts
+  - packages/crypto/src/index.ts
+  - packages/core/src/schema.ts
+  - packages/client/src/index.ts
+  - packages/viewer/src/element.ts
+---
+
+Short answers to the questions people ask before adopting Better Files. Each links to the page with the details.
+
+<Accordions type="single">
+<Accordion title="Is Better Files a hosted service?">
+
+No. It is a TypeScript library that runs inside your application, the way Better IAM does. You install
+`better-files`, call `betterFiles({...})` with your database and storage, and mount it into your app. There is no
+hosted service, no dashboard to deploy and no admin console. See the [overview](/docs/guides).
+
+</Accordion>
+<Accordion title="Do I need Better IAM?">
+
+Better IAM is the identity system Better Files is built for, and `betterIamIntegration(iam)` is the integration it
+ships. Better Files talks to the identity system through an interface, `IamIntegration`, which has:
+
+- `identity` and `authz` (required): who is calling, and whether they may perform an action.
+- `directory` (optional): room roles, groups and invitations. Without it, room, member and group administration
+  report `UNSUPPORTED`.
+- `keys` and `audit` (optional): encryption keys and a security audit sink.
+
+You could implement that interface for another identity system, but Better Files does not ship one. For tests and
+prototypes, `better-files/testing` has `fakeIam`, an in-memory stand-in (see the
+[quickstart](/docs/guides/quickstart) and [testing](/docs/operations/testing)).
+
+Better Files works with `better-iam` 0.2.x from npm. Some features depend on the release; see
+[release compatibility](/docs/guides/better-iam/compatibility).
+
+</Accordion>
+<Accordion title="Where are files stored, and are they encrypted?">
+
+File contents go to the storage adapter you choose: S3 or an S3-compatible service, Google Cloud Storage, Azure Blob
+Storage, a directory on disk, or a cluster of your own servers. See [storage](/docs/operations/storage).
+
+They are encrypted before they reach storage, with AES-256-GCM in 64 KiB segments, under a data key wrapped by a key
+provider. With Better IAM, the default provider is its KMS, with one key per room. You can pass your own provider
+with `encryption: { keys }`, such as `localKeyProvider` for development. `betterFiles()` refuses to start without a
+key provider unless you set `encryption: false`, which is meant for development only. See
+[encryption](/docs/operations/encryption).
+
+</Accordion>
+<Accordion title="Can it share my app's database?">
+
+Yes. The Better Files tables are prefixed `better_files_` (configurable with `schema.tablePrefix`), so they can live
+next to your own tables and Better IAM's. `postgresAdapter({ pool })` reuses your existing `pg` pool, and
+`prismaAdapter` and `drizzleAdapter` use your Prisma or Drizzle client; with those two, `better-files generate`
+writes the tables for your own migration tool. See [databases](/docs/operations/databases).
+
+</Accordion>
+<Accordion title="Does it run on serverless hosts?">
+
+Yes, with two settings that suit them:
+
+- **Background jobs.** By default, jobs run in the same process right after the operation that queued them. With
+  `jobs: { runner: 'deferred' }`, they wait in the database until you call `dr.jobs.work()` or `dr.maintain()`, for
+  example from a cron route. You can also hand jobs to your own queue with a job runner.
+- **Large uploads.** `upload({ direct: true })` on the browser client encrypts in the browser and sends the parts
+  straight to object storage through presigned URLs, so they do not pass through your functions' request-size
+  limits. It needs a storage adapter that presigns parts, such as S3-compatible storage. The server still verifies
+  every segment before it accepts the file.
+
+Schedule `dr.maintain()` every few minutes either way. See [maintenance and jobs](/docs/operations/maintenance-and-jobs)
+and [deployment](/docs/operations/deployment).
+
+</Accordion>
+<Accordion title="How do people from outside the organization get in?">
+
+You invite them into a room by email, with `members.invite`. With a Better IAM release that has guests, they become
+Better IAM guests: sponsored, time-limited and inside a guest boundary. Better IAM 0.2.0 on npm has no guests, so
+inviting an outsider reports `UNSUPPORTED` until you set `externalInvites: 'members'` on the integration. They are
+then invited as tenant members, and also join a group that marks them as outsiders. To share by link instead, the
+[share links plugin](/docs/plugins/links) adds links with passwords, email capture, expiry and use caps. See
+[outsiders](/docs/guides/better-iam/outsiders).
+
+</Accordion>
+<Accordion title="How big can files be?">
+
+5 GiB per file by default. Change it with `limits.maxFileSize`. Uploads are sent in parts of 8 MiB by default
+(`limits.partSize`), and an upload session stays open for 24 hours (`limits.uploadTtlMs`), so large uploads can resume.
+A folder download includes at most 5000 files (`limits.maxBundleFiles`). For limits per room or tenant, use the
+[quotas plugin](/docs/plugins/quotas). See [installation](/docs/guides/installation#options) for every limit.
+
+</Accordion>
+<Accordion title="Which frameworks are supported?">
+
+On the server: Next.js, Nuxt, SvelteKit, React Router, NestJS, Express, Fastify, Hono and Koa, and any runtime that
+takes a fetch handler, since `dr.handler` is one (`dr.nodeHandler` serves Node's `http` module). In the browser: a
+typed client, React hooks, Vue composables and Svelte stores. You can also skip mounting entirely and call `dr.api`
+from your own server code. See [frameworks](/docs/frameworks).
+
+</Accordion>
+<Accordion title="Is there a UI?">
+
+No product screens. Better Files is headless: you build the pages with your own components on top of the typed
+client and the React, Vue or Svelte bindings. The exceptions are pieces that need client code to be secure: a
+resumable uploader in the client, and the `<bf-viewer>` element from `better-files/viewer`, which shows
+server-rendered, watermarked page images so the file itself never reaches the browser.
+
+</Accordion>
+<Accordion title="Can it stop people from taking screenshots?">
+
+No, and nothing in a browser can. Better Files offers deterrence and tracing instead: view-only access through the
+viewer, [watermarks](/docs/plugins/watermark) with a forensic code on the copies people view and download, download
+rate limits from the [guard plugin](/docs/plugins/guard), and an activity log that records views and downloads.
+
+</Accordion>
+<Accordion title="What is the license?">
+
+Apache-2.0, the same as Better IAM.
+
+</Accordion>
+</Accordions>
+
+## Related
+
+- [Overview](/docs/guides)
+- [Installation](/docs/guides/installation)
+- [Security](/docs/operations/security)

@@ -1,0 +1,191 @@
+---
+title: Security
+description: The security model in practice - two authorization layers, encryption at rest, signed tickets, CSRF and SSRF checks, watermarks, audit chains.
+metaTitle: The Better Files security model
+icon: ShieldCheck
+packages: ['@better-files/server', '@better-files/crypto']
+sources:
+  - PLAN.md
+  - docs/adr/0001-two-layer-authorization.md
+  - packages/server/src/pipeline.ts
+  - packages/server/src/http.ts
+  - packages/server/src/files.ts
+  - packages/server/src/engine.ts
+  - packages/server/src/activity.ts
+  - packages/server/src/stream.ts
+  - packages/crypto/src/index.ts
+  - packages/middleware/src/index.ts
+  - packages/plugin-guard/src/index.ts
+  - packages/plugin-webhooks/src/index.ts
+  - packages/plugin-watermark/README.md
+  - packages/plugin-watermark/src/index.ts
+  - tests/security/operation-matrix.test.ts
+---
+
+A data room holds the documents a company is most careful with, and opens them to people outside it: buyers, lenders,
+outside counsel. The controls have to hold when the people inside the room are not all trusted, and leave evidence
+when something goes wrong.
+
+This page is the security model as the code implements it: what each control does, where it is configured, and what
+it does not cover.
+
+| Threat | Control |
+| --- | --- |
+| Reading another room's or tenant's content | Two authorization layers on every operation; unlisted nodes answer `NOT_FOUND`; `tenantId` on every row and query. |
+| Granting yourself more access | Grants are capped at the granter's own effective capabilities. |
+| A stolen bucket or backup | Every file is encrypted with its own data key, wrapped by your key provider. |
+| Download links passed around | Signed tickets that expire after 60 seconds and serve a handful of requests. |
+| Cross-site requests with a user's cookies | The `x-better-files: 1` header and an exact origin check. |
+| Webhooks aimed at your internal network | HTTPS only, private addresses refused at connect time, no redirects. |
+| Leaked copies | Watermarks with a per-copy forensic code, recorded before the copy is served. |
+| Edited history | A hash chain over each room's activity log, checkable at any time. |
+| Bulk downloading | Per-person download limits with anomaly events ([guard plugin](/docs/plugins/guard)). |
+
+## Two authorization layers
+
+Every folder and document operation passes two independent checks, in this order, before its handler runs:
+
+1. **Layer A, the permission matrix.** Better Files resolves the caller's capability mask on the node (`LIST`,
+   `VIEW`, `PRINT`, `COPY_TEXT`, `DOWNLOAD_WATERMARKED`, `DOWNLOAD_ORIGINAL`, `UPLOAD`, `EDIT`, `DELETE`, `MANAGE`,
+   plus plugin capabilities). Grants are inherited down the folder tree, and a locked grant is final for its subtree.
+   The result is then narrowed: closed, archived and provisioning rooms lose `UPLOAD`, `EDIT` and `DELETE`; room
+   settings and document flags such as view-only remove download and print bits; plugins remove more, such as an
+   [NDA](/docs/plugins/nda) not yet accepted or a [quarantined](/docs/plugins/scan) version.
+2. **Layer B, the identity system.** Better IAM (or your integration) decides the operation's action, such as
+   `better-files:documents:download`, on the room, folder or document. Its policies apply here: MFA, IP ranges, device
+   checks, guest boundaries, risk. A refusal in layer B wins even when the matrix allows.
+
+Room and tenant operations get layer B only, and operations marked public (share-link redemption) check their own
+secret instead. One table, `operationMatrix`, maps every operation to its action, target and required capabilities.
+See [permissions](/docs/guides/concepts/permissions) and [the access model](/docs/guides/better-iam/access-model).
+
+A caller cannot grant a mask larger than their own effective mask on that node: someone who may manage a folder but
+not download originals from it cannot let others download originals there.
+
+### Unlisted means not found
+
+A node the caller cannot `LIST` does not exist for them: the call fails with `NOT_FOUND`, the same as an id that was
+never created. Only a caller who can see the node and lacks another capability gets `FORBIDDEN`. The same rule
+applies elsewhere:
+
+- an upload session that belongs to someone else is `NOT_FOUND`;
+- the activity stream answers `NOT_FOUND` for a room the caller may not open;
+- the activity stream shows other people's folder and document changes only for nodes the caller may list, with
+  metadata trimmed to names, and re-checks access every minute;
+- `requireCapabilities` from `better-files/middleware`, for your own routes, follows the same rule.
+
+Better Files' own test suite runs every core operation against every room relation, a guest, a non-member and a
+user of another tenant, and expects denials to be `FORBIDDEN` or `NOT_FOUND` with no change in the database or the
+identity system. A user of another tenant must always see `NOT_FOUND`.
+
+## Encryption at rest
+
+Files are encrypted before they reach storage, with AES-256-GCM over 64 KiB segments. Each segment has its own
+authentication tag, so any byte range decrypts on its own, and truncation, reordering or tampering is detected.
+
+Each stored file gets its own data key from your key provider. The key is stored only in wrapped form, bound to an
+encryption context (`purpose`, `tenantId`, `roomId`, the file's id), and a room can name its own KMS key. Direct
+uploads are encrypted in the browser with the same format, and the server checks every segment before accepting
+the file.
+
+`localKeyProvider` derives a key per tenant from one secret, for development, tests and single-server installs.
+Production deployments use Better IAM's KMS or a cloud KMS, so keys can be rotated and destroyed. `encryption: false`
+stores files in plain text and is meant for development. See [encryption](/docs/operations/encryption).
+
+## Download and viewer tickets
+
+Content never travels with a session cookie. An operation such as `documents.requestDownload`,
+`documents.requestOriginal` or `documents.requestView` checks both layers and issues a **ticket**: a database row
+naming the document, version, variant and recipient, and a URL under `{basePath}/files/` whose token is the row's
+random id plus an HMAC signature made with your `secret`.
+
+- A token with a bad signature is refused before the database is read, so ids cannot be guessed.
+- A ticket expires after 60 seconds (`limits.ticketTtlMs`) and serves at most 5 requests (`limits.ticketUses`),
+  enough for range requests and a resumed download. Expired and used-up tickets answer 404 and 410.
+- The recipient's name, email and address are stored with the ticket, for watermarks and the activity log.
+- Files are served with `cache-control: private, no-store`, `x-content-type-options: nosniff`,
+  `content-security-policy: default-src 'none'; sandbox`, `referrer-policy: no-referrer` and
+  `cross-origin-resource-policy: same-origin`. Originals are sent as `application/octet-stream` attachments unless an
+  inline view was requested.
+- Original downloads are also written to the identity system's audit log.
+
+## CSRF and trusted origins
+
+The protocol refuses operations and upload `PUT`s without the `x-better-files: 1` header, which an HTML form cannot
+send and a cross-site script cannot send without a CORS preflight. Requests that carry cookies must also carry an
+`Origin` equal to the request's own origin or listed in `trustedOrigins`. Bearer-token requests skip the origin check,
+since a browser does not attach them on its own. See
+[deployment](/docs/operations/deployment#csrf-protection-and-trusted-origins).
+
+JSON bodies are limited to 64 KiB by default, and every error leaves the protocol as `{ error: { code, message } }`
+with internal errors reduced to a generic `INTERNAL_ERROR`.
+
+## SSRF protection in webhooks
+
+A tenant administrator chooses webhook URLs, so a careless check would let them make your server call its own
+network. The [webhooks plugin](/docs/plugins/webhooks):
+
+- accepts only `https` URLs without credentials in them;
+- resolves the host and refuses loopback, private, link-local and reserved addresses, when the webhook is created and
+  before each delivery;
+- checks the address again when the connection is made, which defeats DNS rebinding;
+- does not follow redirects.
+
+`allowPrivateNetworks: true` turns these checks off, for development. With a custom `fetch`, the address is checked
+before sending, but the custom client resolves the host again itself, so only the built-in client is safe against
+DNS rebinding. Deliveries are signed (`X-Better-Files-Signature`, HMAC-SHA256 with a timestamp), and
+`verifyWebhookSignature` checks them on the receiving side.
+
+## Watermarks and forensic codes
+
+With the [watermark plugin](/docs/plugins/watermark), every watermarked download or view carries the recipient's
+email or name, the time, their address and a forensic code, tiled across each page or image. The code is ten
+random hexadecimal characters, unique to that copy. It is also hidden where removing the visible stamp does not reach
+it: in PDF keywords and invisible text, and in the pixels of images.
+
+Each copy is recorded before it is served, so a copy that cannot be traced is not handed out. When a copy leaks,
+`watermark.identify` reads the code from a copy uploaded to the room, `watermark.trace` looks a code up across the
+tenant, and `extractForensicCode` reads it from bytes outside any request.
+
+## Activity hash chain
+
+Every room has an append-only activity log. Each record stores the SHA-256 hash of its content and of the previous
+record's hash, and the room keeps the latest hash. Sequences are gap-free.
+
+`dr.verifyActivity({ tenantId, roomId })`, or `better-files verify --tenant <id> --room <id>`, recomputes the chain
+and returns `{ valid, records, head?, brokenAt? }`. A changed, removed or reordered record breaks it at that
+sequence. See [the activity log](/docs/guides/concepts/activity-log) and the [audit plugin](/docs/plugins/audit).
+
+## Rate limits
+
+The [guard plugin](/docs/plugins/guard) limits downloads per person per room: 100 in 10 minutes by default, viewer
+opens included with `countViews`, owners and administrators exempt. Counts come from the activity log, so they hold
+across servers and restarts. A caller over the limit gets `RATE_LIMITED`, a `security.download-anomaly` event is
+emitted, and `onAnomaly` can raise their risk in Better IAM or suspend them. With `risk`, people the identity system
+rates as risky are refused every download and view.
+
+For storage and usage limits, see the [quotas plugin](/docs/plugins/quotas).
+
+## What is not covered
+
+- **Screenshots and photos.** No watermark prevents someone from photographing a screen, and Better Files has no
+  hardware DRM. The visible stamp discourages it and names the source when a copy surfaces.
+- **Authentication.** Sessions, passwords, MFA and device checks belong to the identity system. Better Files trusts
+  the principal it is given and the decisions it gets back.
+- **Request rate limits in general.** Apart from the guard plugin's download counts, the protocol does not limit
+  request rates; put limits in your framework or proxy.
+- **A keyed or anchored activity chain.** The chain uses plain SHA-256 and lives in your database. It reveals edits
+  to individual records, but someone with write access to the database can rebuild the whole chain. Keep exported
+  heads elsewhere if you need to detect that.
+- **Database-level tenant isolation.** Tenants are separated by `tenantId` in every query; there are no PostgreSQL
+  row-level security policies.
+- **Development settings.** `encryption: false`, `allowPrivateNetworks: true` and `trustProxy` without a proxy you
+  control turn protections off.
+
+## Related
+
+- [Deployment](/docs/operations/deployment)
+- [Encryption](/docs/operations/encryption)
+- [Better IAM integration](/docs/guides/better-iam)
+- [Plugins](/docs/plugins): [guard](/docs/plugins/guard), [watermark](/docs/plugins/watermark),
+  [network](/docs/plugins/network), [scan](/docs/plugins/scan), [webhooks](/docs/plugins/webhooks)

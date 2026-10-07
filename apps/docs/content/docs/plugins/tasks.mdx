@@ -1,0 +1,185 @@
+---
+title: Tasks
+description: Checklists and tasks per room, with assignees, due dates, linked documents, progress counts and overdue events from dr.maintain().
+metaTitle: Checklists and tasks for data rooms
+icon: ClipboardList
+packages: ['@better-files/plugin-tasks']
+sources:
+  - packages/plugin-tasks/src/index.ts
+  - packages/plugin-tasks/README.md
+  - packages/plugin-templates/src/index.ts
+  - packages/plugin-notifications/src/index.ts
+  - packages/core/src/plugin.ts
+  - packages/server/src/index.ts
+  - tests/plugins/templates-tasks.test.ts
+  - tests/plugins/analytics-notifications.test.ts
+---
+
+A deal runs on lists: the buyer's due diligence request list, the closing checklist, the steps of a property sale.
+Each item has someone responsible, a date, and usually a document that proves it is done, such as the signed lease or
+the board approval. The deal team wants to see what is still open and be told when something is late.
+
+The tasks plugin keeps those lists inside the room. Tasks belong to a named **checklist** (or none), can be assigned
+and given a due date, link to documents, and are marked done by their assignee. `dr.maintain()` emits `task.overdue`
+once for each task past its due date.
+
+```ts
+import { betterFiles } from 'better-files';
+import { betterFilesIamPlugin } from 'better-files/iam';
+import { tasksPlugin } from 'better-files/plugin-tasks';
+
+const plugins = [tasksPlugin()] as const;
+const iamPlugin = betterFilesIamPlugin({ plugins }); // registers the better-files:tasks:* actions
+
+export const dr = betterFiles({ /* iam, database, storage, secret */ plugins });
+
+const task = await dr.api.tasks.create(dealLead, {
+  tenantId,
+  roomId,
+  checklist: 'Closing',
+  title: 'Upload the signed lease',
+  assigneeId: carolIdentityId,
+  dueAt: Date.now() + 7 * 86_400_000,
+});
+
+// Carol marks it done.
+await dr.api.tasks.complete(carol, { tenantId, taskId: task.id });
+```
+
+`tasksPlugin()` takes no options. The plugin owns one table, `tasks`. On a SQL database, run `better-files generate`
+and `better-files migrate` after adding it.
+
+## Permissions
+
+| Action | Granted to | What it allows |
+| --- | --- | --- |
+| `better-files:tasks:read` | every room relation (`owner`, `admin`, `publisher`, `editor`, `contributor`, `viewer`, `auditor`) | List tasks, and complete tasks assigned to you |
+| `better-files:tasks:manage` | `owner`, `admin`, `publisher`, `editor` | Create, update, delete and complete any task |
+
+Every member who may read the room sees all of its tasks, including their titles and descriptions. There is no
+per-task or per-group visibility, so keep sensitive wording out of task titles in rooms shared by competing bidders.
+
+## Endpoints
+
+Each endpoint is on `dr.api.tasks` on the server and `client.tasks` in the browser. All inputs also take `tenantId`.
+
+### create
+
+`dr.api.tasks.create(credential, input)` needs `better-files:tasks:manage`.
+
+<TypeTable
+  type={{
+    roomId: { type: 'string', description: 'The room.', required: true },
+    title: { type: 'string', description: '1 to 300 characters, trimmed.', required: true },
+    description: { type: 'string', description: 'Up to 5,000 characters.' },
+    checklist: { type: 'string', description: 'The checklist name, 1 to 120 characters, such as Closing. Tasks without one are loose.' },
+    assigneeId: { type: 'string', description: 'The identity responsible for the task.' },
+    dueAt: { type: 'number', description: 'Due time in epoch milliseconds.' },
+    nodeIds: { type: 'string[]', description: 'Up to 50 documents or folders that satisfy or support the task.' },
+  }}
+/>
+
+New tasks start `open` and go to the end of the room's list: `position` is one more than the highest position in the
+room. The plugin does not check that `assigneeId` is a room member or that `nodeIds` belong to the room.
+
+### list
+
+`dr.api.tasks.list(credential, { tenantId, roomId, checklist?, mine? })` needs `better-files:tasks:read` and works on
+closed rooms. `checklist` keeps one checklist; `mine: true` keeps tasks assigned to the caller. It returns the tasks
+in `position` order and a progress count per checklist:
+
+```ts
+const { tasks, progress } = await dr.api.tasks.list(credential, { tenantId, roomId, checklist: 'Closing' });
+// progress: [{ checklist: 'Closing', total: 8, done: 3 }]; loose tasks count under checklist: null
+```
+
+### update
+
+`dr.api.tasks.update(credential, { tenantId, taskId, ...changes })` needs `better-files:tasks:manage`. It changes
+`title`, `description`, `assigneeId`, `dueAt` and `nodeIds`; fields left out stay as they are. Pass `null` for
+`description`, `assigneeId` or `dueAt` to clear them. `nodeIds` replaces the whole list. Changing `dueAt` resets the
+overdue marker, so a task moved to a new date can be reported overdue again. The checklist cannot be changed.
+
+### complete
+
+`dr.api.tasks.complete(credential, { tenantId, taskId, done? })` marks a task done, or open again with
+`done: false`. The task's assignee may call it with `better-files:tasks:read`; anyone else needs
+`better-files:tasks:manage`. Completing records `completedAt` and `completedBy`; reopening clears them. Completing a
+task that is already done, or reopening one that is open, fails with `CONFLICT`.
+
+### delete
+
+`dr.api.tasks.delete(credential, { tenantId, taskId })` needs `better-files:tasks:manage` and removes the task. It
+returns `{ deleted: true }`.
+
+## Overdue tasks
+
+`dr.maintain()` calls the plugin's maintenance step. It finds open tasks whose `dueAt` has passed and that have not
+been reported yet, sets their `overdueNotifiedAt`, and emits `task.overdue` with `taskId`, `title`, `assigneeId` and
+`dueAt`. Each task is reported once; running `dr.maintain()` again does not repeat it unless `update` gives the task a
+new `dueAt`. One run handles up to 500 overdue tasks across all tenants, and the next run picks up the rest.
+
+```ts
+dr.events.subscribe('task.overdue', async (event) => {
+  await chat.post(`Overdue in ${event.roomId}: ${String(event.data.title)}`);
+});
+```
+
+Schedule `dr.maintain()` every few minutes. Events from maintenance have `actorId: 'system'`.
+
+## Events and activity
+
+| Step | Activity log | Event payload |
+| --- | --- | --- |
+| create | `task.created` with `taskId`, `title` | `task.created`: `taskId`, `title`, `assigneeId` |
+| update | none | `task.updated`: `taskId` |
+| complete | `task.completed` with `taskId`, `title` | `task.completed`: `taskId`, `title` |
+| reopen | `task.reopened` with `taskId`, `title` | `task.reopened`: `taskId`, `title` |
+| delete | none | none |
+| overdue | none | `task.overdue`: `taskId`, `title`, `assigneeId`, `dueAt` |
+
+Updates and deletions leave no trace in the activity log. If you need them audited, record them from your own code.
+
+The [notifications plugin](/docs/plugins/notifications) emails the assignee on `task.created` and `task.overdue`.
+
+## Checklists from templates
+
+The [templates plugin](/docs/plugins/templates) creates checklist tasks through `tasks.create` when it builds or
+applies a template, turning each item's `dueInDays` into a `dueAt`. Without the tasks plugin, template checklists are
+skipped. Applying a template again adds its checklist tasks again; the test suite shows the `Closing` checklist
+growing from 4 to 8 tasks after a second apply.
+
+## In the browser
+
+```tsx
+const mine = useQuery(`tasks:${roomId}:mine`, (client) => client.tasks.list({ roomId, mine: true }));
+
+const complete = useAction((client, taskId: string) => client.tasks.complete({ taskId }), 'tasks:');
+```
+
+## Room state and NDAs
+
+`create`, `update`, `complete` and `delete` fail with `ROOM_CLOSED` in a closed or archived room; `list` still works.
+With the [NDA plugin](/docs/plugins/nda), task operations are refused until the caller accepts the room's NDA.
+
+## Errors
+
+| Code | When |
+| --- | --- |
+| `INVALID_INPUT` | Input fails validation. |
+| `NOT_FOUND` | The task does not exist in the tenant. |
+| `FORBIDDEN` | Better IAM refuses the action, or someone other than the assignee completes a task without `manage`. |
+| `CONFLICT` | Completing a done task or reopening an open one. |
+| `ROOM_CLOSED` | A mutating call on a closed or archived room. |
+
+## Limits
+
+- Titles 300 characters, descriptions 5,000, checklist names 120, 50 linked nodes per task.
+- 500 overdue tasks per `dr.maintain()` run.
+
+## Related
+
+- [Notifications](/docs/plugins/notifications): emails for assignments and overdue tasks.
+- [Room templates](/docs/plugins/templates): checklists that come with a room template.
+- [Q&A](/docs/plugins/qa): questions and answers alongside the checklist.
+- [Webhooks](/docs/plugins/webhooks): forward `task.*` events.

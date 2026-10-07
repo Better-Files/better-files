@@ -1,0 +1,196 @@
+---
+title: Cloud drive import
+description: Import files and folders from Google Drive, Dropbox, OneDrive, SharePoint and Box into a room, and re-import only what changed.
+metaTitle: Import from Google Drive, Dropbox and Box
+icon: ArrowDownToLine
+packages: ['@better-files/plugin-connectors']
+sources:
+  - packages/plugin-connectors/src/index.ts
+  - packages/plugin-connectors/src/providers.ts
+  - packages/plugin-connectors/README.md
+  - packages/plugin-connectors/package.json
+  - packages/core/src/plugin.ts
+  - tests/plugins/connectors.test.ts
+---
+
+When a deal starts, the documents usually already sit in someone's Google Drive, Dropbox, OneDrive, SharePoint
+library or Box account. Downloading them to a laptop and uploading them again loses the folder structure, takes time,
+and leaves copies behind on the laptop.
+
+The connectors plugin lets a room member browse their cloud drive from your app, pick files and folders, and copy
+them into a room folder. Folders become folders. Files are encrypted and versioned like uploads and recorded as that
+member's. Importing the same items again brings changed files in as new versions and skips the rest.
+
+```ts
+import { betterFiles } from 'better-files';
+import { betterFilesIamPlugin } from 'better-files/iam';
+import { box, connectorsPlugin, dropbox, googleDrive, microsoftGraph } from 'better-files/plugin-connectors';
+
+const plugins = [
+  connectorsPlugin({
+    connectors: [googleDrive(), dropbox(), microsoftGraph(), microsoftGraph({ driveId }), box()],
+    // Your app runs the OAuth flow and stores tokens; return the caller's access token, refreshed as needed.
+    token: ({ connector, principalId, tenantId }) => oauthTokens.get(tenantId, principalId, connector),
+  }),
+] as const;
+
+const iamPlugin = betterFilesIamPlugin({ plugins }); // registers better-files:connectors:use
+export const dr = betterFiles({ /* iam, database, storage, secret */ plugins });
+```
+
+The plugin owns two tables, `connectorImports` (one row per import) and `connectorLinks` (which remote file became
+which document). On a SQL database, run `better-files generate` and `better-files migrate` after adding it.
+
+## Options
+
+<TypeTable
+  type={{
+    connectors: {
+      type: 'readonly Connector[]',
+      description: 'The drives people can import from. Each has an id that callers name in browse and import.',
+      required: true,
+    },
+    token: {
+      type: '(input: { connector; principalId; tenantId }) => Promise<string | undefined>',
+      description: "The caller's OAuth access token for a connector. Called before each provider request, so it can refresh. Return undefined (or throw) when the person has not connected that drive.",
+      required: true,
+    },
+    maxFiles: { type: 'number', description: 'Files per import; the rest fail with a limit message.', default: '2000' },
+    maxBytes: { type: 'number', description: 'The largest file imported.', default: '250 MiB' },
+    fetch: { type: 'typeof fetch', description: 'The fetch used for provider calls (tests, proxies).', default: 'globalThis.fetch' },
+  }}
+/>
+
+## OAuth is your app's job
+
+Better Files does not run OAuth flows or store provider tokens. Register an OAuth app with each provider, let people
+connect their account in your app, keep their refresh tokens in your own store, and return a current access token
+from `token`. When it returns `undefined`, the call fails with `FORBIDDEN` and the message `Connect {label} first`, which
+your interface can turn into a "Connect" button.
+
+| Connector | `id` | `label` | Read scopes it needs |
+| --- | --- | --- | --- |
+| `googleDrive()` | `google-drive` | Google Drive | `drive.readonly`; includes shared drives |
+| `dropbox()` | `dropbox` | Dropbox | `files.metadata.read`, `files.content.read` |
+| `microsoftGraph()` | `onedrive` | OneDrive | `Files.Read.All`; the signed-in user's drive |
+| `microsoftGraph({ driveId })` | `sharepoint:{driveId}` | SharePoint | `Files.Read.All`; one document library |
+| `box()` | `box` | Box | Read all files and folders |
+
+Each factory also takes a base URL option (`baseUrl`; for Dropbox, `apiUrl` and `contentUrl`) for tests or regional
+endpoints. The connectors call the providers' REST APIs over `fetch`, with no SDKs.
+
+Provider details worth knowing:
+
+- **Google Drive.** Google Docs, Slides and Drawings have no file of their own, so they are exported as PDF (with
+  `.pdf` added to the name). Sheets are exported as `.xlsx`. Trashed files are left out.
+- **Dropbox.** Deleted entries are left out.
+- **Box.** Web links are left out.
+
+## Browse and import
+
+| Endpoint | Input | Permission | Returns |
+| --- | --- | --- | --- |
+| `connectors.list` | `roomId` | `better-files:connectors:use` on the room (also when closed) | `{ id, label }[]` of the configured connectors |
+| `connectors.browse` | `roomId`, `connector`, `folderId?` | `better-files:connectors:use` on the room | `RemoteItem[]`: folders first, then by name |
+| `connectors.import` | `connector`, `destinationId`, `items` (1 to 500) | `better-files:connectors:use` and `UPLOAD` on the destination folder | `{ importId, status: 'running' }` |
+| `connectors.status` | `importId` | `better-files:connectors:use` on the import's room (also when closed) | The import record |
+
+```ts
+// The drive's root; pass folderId to open a folder.
+const items = await files.connectors.browse({ roomId, connector: 'google-drive' });
+
+const { importId } = await files.connectors.import({
+  connector: 'google-drive',
+  destinationId: folderId,
+  items: items.filter((item) => selected.has(item.id)),
+});
+
+const progress = await files.connectors.status({ importId });
+// { status: 'running' | 'done' | 'failed', imported, updated, skipped, failed, errors, finishedAt?, … }
+```
+
+These are [typed client](/docs/frameworks/client) calls. On the server, call
+`dr.api.connectors.browse(credential, input)` and so on, with `tenantId` in the input. A `RemoteItem` has an `id`, a
+`name`, a `kind` (`folder` or `file`), and optionally `size`, `mimeType`, `modifiedAt` and `revision`. Pass items to
+`import` as `browse` returned them: `revision` is how a later import recognizes unchanged files.
+
+The `better-files:connectors:use` action is granted to the room relations `owner`, `admin`, `publisher`, `editor` and
+`contributor`. An unknown connector id is `INVALID_INPUT`, and a destination that is not a folder is `INVALID_INPUT`.
+`status` answers `NOT_FOUND` to anyone but the person who started the import, unless they pass
+`better-files:admin` on the room.
+
+## How an import runs
+
+`import` checks the caller's token, records the import as `running`, and returns. The copy starts after the request
+commits, in the same server process:
+
+1. Items are handled one after another. A folder is matched by name (without case) to an existing folder under the
+   parent, or created with `folders.create` as the caller; its children are listed from the provider and queued.
+2. A file whose link already exists, whose document is not deleted, and whose `revision` equals the stored one is
+   **skipped**. A linked file with a different revision is downloaded as a new version (**updated**). Anything else is
+   downloaded as a new document (**imported**).
+3. Names have control characters, slashes and backslashes replaced with `_` and are cut to 255 characters.
+4. Each version comment is `Imported from {label}`.
+
+A file that fails (too large, refused by the provider, over `maxFiles`) is counted as **failed** and its name and
+message are added to `errors` (the first 50 are kept). Progress is saved every 25 items, and the import ends as
+`done`, or `failed` when something outside a single file broke.
+
+The revision is the provider's content hash or tag: Google Drive's MD5 checksum (or its version or modified time),
+Dropbox's content hash (or rev), Microsoft Graph's `cTag` (or `eTag`), Box's SHA-1 (or etag). Files without one are
+downloaded again on every import.
+
+<Callout type="warn" title="Imports are not durable jobs">
+  The copy runs in memory after the request (`afterCommit`), not as a queued job. If the server restarts mid-import,
+  the import stays `running` and nothing resumes it; `dr.maintain()` does not pick it up. Start the import again:
+  files already copied are skipped.
+</Callout>
+
+## Errors from providers
+
+Provider calls that answer with an HTTP error become `CONFLICT` errors with the message
+`{label} refused the request ({status})` and details `{ provider, status, detail }`, where `detail` is up to 200
+characters of the response body. A file larger than `maxBytes` (by its declared length or while reading) is
+`PAYLOAD_TOO_LARGE`. During an import these errors are recorded per file; from `browse` they reach the caller.
+
+## Events and activity
+
+When an import finishes, the room's activity log gets `connector.imported` on the destination folder, with the
+connector, the import id and the four counts. `connectors.import.finished` is emitted with the same counts. The
+documents themselves are recorded like uploads by the caller.
+
+## Your own connector
+
+A `Connector` has an `id`, a `label` and two methods. Implement it for SFTP, a document management system or another
+data room:
+
+```ts
+import type { Connector } from 'better-files/plugin-connectors';
+
+const archive: Connector = {
+  id: 'archive',
+  label: 'Records archive',
+  async list({ token, fetch, folderId }) {
+    const response = await fetch(`https://archive.example.com/folders/${folderId ?? 'root'}`, {
+      headers: { authorization: `Bearer ${token}` },
+    });
+    return response.json(); // RemoteItem[]
+  },
+  async download({ token, fetch, item, maxBytes }) {
+    const response = await fetch(`https://archive.example.com/files/${item.id}`, {
+      headers: { authorization: `Bearer ${token}` },
+    });
+    return { bytes: new Uint8Array(await response.arrayBuffer()), filename: item.name };
+  },
+};
+```
+
+`download` receives `maxBytes` and should refuse larger files itself; the built-in connectors stop reading once the
+limit is passed.
+
+## Related
+
+- [Document processing](/docs/plugins/processing): imported Office files get PDF renditions and thumbnails
+- [Virus scanning](/docs/plugins/scan): imported files are scanned like uploads
+- [Email to a room](/docs/plugins/inbound)
+- [Typed client](/docs/frameworks/client)

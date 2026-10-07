@@ -1,0 +1,87 @@
+---
+title: Concepts
+description: The words Better Files uses for rooms, content, people and access, and where each idea is explained in depth.
+metaTitle: Better Files concepts
+icon: Library
+packages: ['@better-files/core', '@better-files/server']
+sources:
+  - packages/core/src/tables.ts
+  - packages/core/src/capabilities.ts
+  - packages/core/src/acl.ts
+  - packages/core/src/operations.ts
+  - packages/core/src/plugin.ts
+  - packages/server/src/index.ts
+  - packages/server/src/files.ts
+---
+
+A data room is a place where one party shares confidential documents with others, with control over who sees what,
+what they may do with it, and a record of what they did. Better Files gives your app that place as a library. These
+pages explain the model it is built on, one idea at a time.
+
+Every call follows the same shape: a credential, the tenant, and the input.
+
+```ts
+const room = await dr.api.rooms.create(credential, { tenantId, name: 'Project Falcon' });
+const folder = await dr.api.folders.create(credential, {
+  tenantId,
+  parentId: room.rootNodeId,
+  name: 'Financials',
+});
+```
+
+## Vocabulary
+
+| Term | Meaning |
+| --- | --- |
+| Tenant | One organization in your app. Every record carries a `tenantId`; an id from another tenant is simply not found. |
+| Room | A data room: a tree of folders and documents, its people, its settings and its status (`draft`, `live`, `closed`, `archived`). |
+| Node | One item in a room's tree: a folder or a document. Permissions, activity and moves all work on nodes. |
+| Folder | A node that holds other nodes. Each room has one root folder, `rootNodeId`, named `Index`. |
+| Document | A node that holds a file. Its content lives in versions. |
+| Version | One upload of a document's content, numbered from 1. One version is current; older ones stay available to editors. |
+| Member | A row on the room's roster: a person who was invited, joined, or was suspended, removed or expired. |
+| Permission group | A named set of members in one room, such as "Buyers". It is a Better IAM group under the hood. |
+| Relation | A person's or group's role on the room in Better IAM: `owner`, `admin`, `publisher`, `editor`, `contributor`, `viewer` or `auditor`. It decides which actions they may perform. |
+| Capability | One thing a subject may do with a node: `LIST`, `VIEW`, `PRINT`, `COPY_TEXT`, `DOWNLOAD_WATERMARKED`, `DOWNLOAD_ORIGINAL`, `UPLOAD`, `EDIT`, `DELETE` or `MANAGE`. |
+| Preset | A named set of capabilities, such as `view` or `download`, so you rarely list capabilities by hand. |
+| Entry | One cell of the permission matrix: a subject (a person, a group or a share link), a node, and the capabilities granted there. |
+| Ticket | A short-lived signed token for one file transfer: a download, a viewer page, or a ZIP. |
+| Activity record | One line of a room's activity log: who did what, to which node, when. Records are hash-chained, so edits are detectable. |
+| Plugin | A package that adds tables, endpoints, capabilities and hooks, such as NDA gating or watermarking. |
+
+## How access is decided
+
+Each operation passes two checks, and either can refuse it:
+
+1. **The permission matrix (layer A)**, kept by Better Files: which capabilities a person holds on a folder or
+   document, from entries on that node and its ancestors.
+2. **A Better IAM decision (layer B)**: whether the person may perform the operation's action, such as
+   `better-files:documents:download`, which follows from their relation on the room and your own policies.
+
+[Permissions](/docs/guides/concepts/permissions) explains both layers in detail.
+
+## Pages
+
+<Cards>
+  <Card title="Rooms and content" href="/docs/guides/concepts/rooms-and-content" icon="Boxes">
+    Room lifecycle and settings, the folder tree, index numbers, trash, versions and exports.
+  </Card>
+  <Card title="Permissions" href="/docs/guides/concepts/permissions" icon="ShieldCheck">
+    Capabilities, presets, inheritance, locked entries, clamps, and the Better IAM decision.
+  </Card>
+  <Card title="Members and groups" href="/docs/guides/concepts/members-and-groups" icon="Users">
+    Invitations, room roles, permission groups, suspensions and access windows.
+  </Card>
+  <Card title="Uploads and downloads" href="/docs/guides/concepts/uploads-and-downloads" icon="ArrowDownToLine">
+    Upload sessions, tickets, the secure viewer, and ZIP downloads.
+  </Card>
+  <Card title="Activity log" href="/docs/guides/concepts/activity-log" icon="ScrollText">
+    The per-room, hash-chained record of who did what.
+  </Card>
+  <Card title="Events and live updates" href="/docs/guides/concepts/events-and-live" icon="RadioTower">
+    Server-side event subscriptions and the room activity stream.
+  </Card>
+  <Card title="Schema" href="/docs/guides/concepts/schema" icon="Database">
+    The tables Better Files creates, and adding fields of your own.
+  </Card>
+</Cards>

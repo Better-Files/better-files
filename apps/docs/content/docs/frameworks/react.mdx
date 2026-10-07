@@ -1,0 +1,172 @@
+---
+title: React
+metaTitle: Better Files for React
+description: Typed hooks for rooms, folders, documents and members, batched capability checks with Can, uploads with progress, and live rooms.
+icon: ReactJs
+packages:
+  - '@better-files/react'
+  - '@better-files/client'
+sources:
+  - packages/react/src/index.tsx
+  - packages/client/src/cache.ts
+  - packages/client/src/live.ts
+---
+
+`better-files/react` wraps the [typed client](/docs/frameworks/client) in hooks that share one query cache. Reads are
+deduplicated, uploads and writes refresh the views they affect, and `useLiveRoom` keeps a room current as other
+people work in it. The bindings render no UI: they give you data and state for your own design system.
+
+## Set up
+
+Create the bindings once for your server's type, and wrap your tree in the provider:
+
+```tsx title="lib/files.ts"
+'use client';
+import { createBetterFilesClient } from 'better-files/client';
+import { createBetterFilesReact } from 'better-files/react';
+import type { dr } from '@/server/better-files';
+
+export const files = createBetterFilesClient<typeof dr>({ tenantId: () => getTenantId() });
+
+export const {
+  BetterFilesProvider,
+  useRooms,
+  useRoom,
+  useRoomIndex,
+  useFolder,
+  useDocument,
+  useMembers,
+  useActivity,
+  useCapabilities,
+  useUpload,
+  useAction,
+  useLiveRoom,
+  useQuery,
+  useInvalidate,
+  useClient,
+  Can,
+} = createBetterFilesReact<typeof dr>();
+```
+
+```tsx title="app/providers.tsx"
+'use client';
+import { BetterFilesProvider, files } from '@/lib/files';
+
+export function Providers({ children }: { children: React.ReactNode }) {
+  return <BetterFilesProvider client={files}>{children}</BetterFilesProvider>;
+}
+```
+
+## Reading
+
+Each read hook returns `{ data, error, loading, refresh }`. Pass `null` or `undefined` while an id is not known yet,
+and the hook waits instead of fetching.
+
+```tsx
+function FolderView({ roomId, folderId }: { roomId: string; folderId: string }) {
+  const folder = useFolder(folderId);
+  if (folder.loading) return <Spinner />;
+  if (folder.error) return <ErrorState error={folder.error} />;
+  return <FileTable rows={folder.data!.items} />;
+}
+```
+
+| Hook                                  | Calls                      |
+| ------------------------------------- | -------------------------- |
+| `useRooms({ status? })`               | `rooms.list`               |
+| `useRoom(roomId)`                     | `rooms.get`                |
+| `useRoomIndex(roomId)`                | `rooms.index`              |
+| `useFolder(nodeId)`                   | `folders.list`             |
+| `useDocument(nodeId)`                 | `documents.get`            |
+| `useMembers(roomId)`                  | `members.list`             |
+| `useActivity(roomId, { limit? })`     | `activity.list`            |
+| `useCapabilities(roomId, nodeIds)`    | `permissions.capabilities` |
+| `useQuery(key, (client) => …)`        | anything else, cached under `key` |
+
+`refresh()` fetches again and keeps showing the current data meanwhile. `useInvalidate()` returns a function that
+drops cached results by key prefix (`invalidate('folder:')`), or all of them. Mounted hooks then fetch again.
+
+## Capabilities and Can
+
+Ask for the capabilities of a whole page of nodes in one request:
+
+```tsx
+const ids = folder.data?.items.map((item) => item.id) ?? [];
+const caps = useCapabilities(roomId, ids);
+
+<FileTable
+  rows={folder.data?.items ?? []}
+  canDownload={(id) => caps.can(id, 'DOWNLOAD_ORIGINAL')}
+/>;
+```
+
+`Can` renders its children only when the person holds a capability on a node, and `fallback` otherwise:
+
+```tsx
+<Can roomId={roomId} nodeId={doc.id} capability="DOWNLOAD_ORIGINAL" fallback={<WatermarkedOnly />}>
+  <DownloadOriginalButton />
+</Can>
+```
+
+<Callout type="warn" title="Advisory only">
+  `Can` and `useCapabilities` decide what to show. The server checks both authorization layers on every operation,
+  whatever the browser renders.
+</Callout>
+
+## Uploads
+
+```tsx
+function DropZone({ folderId }: { folderId: string }) {
+  const { upload, items, clear } = useUpload();
+  return (
+    <Dropzone
+      onFiles={(fileList) => fileList.forEach((file) => void upload({ parentId: folderId, file }))}
+    >
+      {items.map((item) => (
+        <Progress key={item.id} label={item.filename} value={item.progress.ratio} status={item.status} />
+      ))}
+    </Dropzone>
+  );
+}
+```
+
+`upload` takes the client's [upload input](/docs/frameworks/client#uploads), including `direct: true`. Each item has
+`filename`, `progress`, `status` (`uploading`, `done` or `failed`), `error` and, when done, `documentId`. When a file
+lands, the destination folder, the room index and the document refresh. `clear()` removes finished items.
+
+## Writes
+
+`useAction` wraps any write, tracks `pending` and `error`, and invalidates cache prefixes when it succeeds:
+
+```tsx
+const rename = useAction(
+  (client, nodeId: string, name: string) => client.documents.rename({ nodeId, name }),
+  ['folder:', 'document:', 'index:'],
+);
+
+<button disabled={rename.pending} onClick={() => rename.run(doc.id, 'Lease (signed).pdf')}>
+  Rename
+</button>;
+```
+
+## Live rooms
+
+```tsx
+function RoomPage({ roomId }: { roomId: string }) {
+  const latest = useLiveRoom(roomId, (activity) => {
+    if (activity.action === 'document.uploaded') toast('New document');
+  });
+  const index = useRoomIndex(roomId);
+  // …
+}
+```
+
+While mounted, `useLiveRoom` follows the room's activity stream and invalidates what each entry affects: the index,
+folders, documents, members and capabilities. Every view in the room stays current. It returns the latest entry.
+Each person only receives entries about what they may list.
+
+## Server rendering
+
+The hooks fetch on the client after mount. To render data on the server, load it there with the bound API (for
+example `drNext.request()` in a [Next.js](/docs/frameworks/nextjs) server component) and pass it to your component
+as props. Use the hooks for the interactive parts.

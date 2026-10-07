@@ -1,0 +1,134 @@
+---
+title: Access model
+description: How room roles become Better IAM relations, how the participant role turns them into actions, and how decisions reach folders and documents.
+icon: Scale
+packages: ['@better-files/iam', '@better-files/core']
+sources:
+  - packages/iam/src/index.ts
+  - packages/core/src/operations.ts
+  - packages/server/src/endpoints/people.ts
+---
+
+Every operation in Better Files passes two layers, and either can refuse it:
+
+1. **The permission matrix** in Better Files decides what someone may do with a folder or document: list it, view
+   it, download it, upload into it, manage it. See [Permissions](/docs/guides/concepts/permissions).
+2. **A Better IAM decision** on the operation's action, such as `better-files:documents:download-original`, made on
+   the resource it targets. This is where room roles, MFA, IP ranges, guest boundaries and your own policies apply.
+
+This page is about the second layer: what Better Files registers in Better IAM, and how a decision is made.
+
+## Resource types
+
+`betterFilesIamPlugin()` registers three resource types:
+
+| Type | Id | Attributes policies can read |
+| --- | --- | --- |
+| `better-files-room` | the room id | `status`, `classification`, `requireMfa`, `requireNda`, `downloadsEnabled` |
+| `better-files-folder` | the folder id | `roomId`, `roomStatus`, `classification` |
+| `better-files-document` | the document id | `roomId`, `roomStatus`, `classification`, `viewOnly` |
+
+Rooms are **registered** resources: `rooms.create` registers each room with Better IAM before anything else
+happens, and room updates keep its attributes current. Folders and documents are not registered. Their parent is the
+room, and `betterFilesResolver()` describes them when Better IAM needs them, so a decision on a document sees the
+room's relations as `resource.parentRelations`.
+
+Two operations are tenant-wide rather than per room, and are decided on `iam/{tenantId}`: `rooms.create`
+(`better-files:rooms:create`) and `rooms.list` (`better-files:rooms:read`).
+
+## Room roles are relations
+
+A room role is a Better IAM **relationship tuple**: a person or a group holds a relation on `better-files-room/{id}`.
+`members.invite` with a `relation`, `members.setRole`, and `rooms.create` (which makes the creator `owner`) all write
+tuples through the integration. There are seven relations, and the default access model grants them these actions:
+
+| Relation | Actions it grants |
+| --- | --- |
+| every relation | `rooms:read`, `documents:list`, `documents:view`, `documents:download`, `documents:download-original`, `versions:read` |
+| `owner`, `admin`, `publisher`, `editor`, `contributor` | `documents:upload` |
+| `owner`, `admin`, `publisher`, `editor` | `documents:edit`, `documents:delete`, `documents:restore`, `versions:manage` |
+| `owner`, `admin`, `publisher` | `rooms:publish`, `members:read`, `members:invite` |
+| `owner`, `admin` | `admin`, `rooms:update`, `rooms:close`, `rooms:reopen`, `rooms:archive`, `rooms:export`, `members:remove`, `members:manage`, `permissions:read`, `permissions:manage`, `activity:read`, `activity:export` |
+| `owner` | `rooms:delete` |
+| `auditor` | `activity:read`, `activity:export`, `members:read` |
+
+All actions are in the `better-files:` namespace. The list is the full set an action can come from; whether an
+operation then succeeds also depends on the permission matrix. A viewer holds `documents:download-original` here,
+but cannot download an original unless the matrix also gives them `DOWNLOAD_ORIGINAL` on that document.
+
+Plugins add their own grants through their `accessModel`. A few plugin actions have none (managing webhooks, storage
+quotas or templates, tracing a watermark) and are tenant-wide, so only your own Better IAM roles can grant them. Each
+plugin page says which.
+
+## The participant role
+
+Relations alone do not allow anything in Better IAM; a role's policy has to turn them into actions. With
+`accessModel: 'auto'` (the default), the integration finds or creates a role named **Better Files participant** in
+each tenant and binds it to every person and group given a room role. Its policy is `accessModelPolicy(grants)`:
+
+```ts
+import { accessModelPolicy } from 'better-files/iam';
+
+const policy = accessModelPolicy();
+// statements:
+//   allow better-files:rooms:read on iam/*                        (list rooms; filtered room by room)
+//   allow <actions> on better-files-room/*      when resource.relations contains one of <relations>
+//   allow <actions> on better-files-folder/*, better-files-document/*
+//                                               when resource.parentRelations contains one of <relations>
+```
+
+`grants` defaults to the core access model; at startup the integration adds every plugin's `accessModel` before the
+role is created. The participant role is one of the [records Better Files manages](/docs/guides/better-iam/managed-records):
+changing or unbinding it outside Better Files is refused.
+
+### Managing the role yourself
+
+With `accessModel: 'manual'`, the integration neither creates nor binds the role. Create it with the same policy and
+bind it to whoever should reach rooms, for example a group every employee belongs to:
+
+```ts
+import { coreAccessModel } from 'better-files';
+import { accessModelPolicy, betterIamIntegration } from 'better-files/iam';
+
+const grants = [...coreAccessModel, ...plugins.flatMap((plugin) => plugin.accessModel ?? [])];
+const role = await iam.api.roles.create(admin, {
+  tenantId,
+  name: 'Data rooms',
+  document: accessModelPolicy(grants),
+});
+
+const dr = betterFiles({
+  iam: betterIamIntegration(iam, { iamPlugin, systemCredential, accessModel: 'manual' }),
+  // …
+});
+```
+
+## Your own policies
+
+Because each data room action is a Better IAM action on a typed resource, the policies you already write apply to
+data rooms too. Two common ones:
+
+```ts
+// Let a "Deal team" role create rooms in its tenant.
+{
+  sid: 'CreateRooms',
+  effect: 'allow',
+  actions: ['better-files:rooms:create'],
+  resources: ['iam/*'],
+}
+```
+
+Statements that deny always win over allows, so a deny is how you narrow what room roles grant. For people invited
+from outside the organization, [`outsiderBoundary()`](/docs/guides/better-iam/outsiders#keep-outsiders-contained)
+builds a deny statement for exactly that group.
+
+<Callout type="info" title="Tenant owners">
+  A Better IAM tenant owner holds every permission, including `better-files:admin`, so owners act as administrators
+  of every room in their tenant unless one of your policies denies it.
+</Callout>
+
+## Related
+
+- [Permissions](/docs/guides/concepts/permissions): the first layer, the permission matrix.
+- [Reference: actions](/docs/reference/actions) and [operations](/docs/reference/operations).
+- [Service account](/docs/guides/better-iam/service-account): who writes these tuples and roles.

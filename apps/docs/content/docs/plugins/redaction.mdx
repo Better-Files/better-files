@@ -1,0 +1,203 @@
+---
+title: Redaction
+description: Find personal data and confidential terms in PDFs, then burn them out of PDFs and images as a new version or a redacted copy.
+metaTitle: Redact PDFs and images
+icon: VenetianMask
+packages: ['@better-files/plugin-redaction']
+sources:
+  - packages/plugin-redaction/src/index.ts
+  - packages/plugin-redaction/README.md
+  - packages/plugin-redaction/package.json
+  - packages/server/src/endpoints/nodes.ts
+  - tests/plugins/redaction.test.ts
+  - tests/plugins/redaction-history.test.ts
+---
+
+Before an employee census or a customer contract goes to buyers, someone has to take out what they must not see:
+social security numbers, home phone numbers, bank details, the code name of another deal. Drawing a black box over
+text in a PDF editor often leaves the text underneath, where anyone can copy it out.
+
+The redaction plugin finds sensitive text in a PDF and shows you where it is, so a person can review it. It then
+**burns** the boxes in: each page with a redaction is turned into an image with the boxes drawn on it, so nothing
+under a box survives. The result is stored as a new version of the document, or as a redacted copy next to it.
+
+```npm
+npm i pdf-lib unpdf @napi-rs/canvas
+```
+
+```ts
+import { betterFiles } from 'better-files';
+import { redactionPlugin } from 'better-files/plugin-redaction';
+
+const plugins = [redactionPlugin({ patterns: { employeeId: /\bEMP-\d{6}\b/g } })] as const;
+
+export const dr = betterFiles({ /* iam, database, storage, secret */ plugins });
+
+// 1. Review what would be removed.
+const { matches } = await dr.api.redaction.find(credential, {
+  tenantId,
+  nodeId,
+  patterns: ['email', 'ssn', 'employeeId'],
+  terms: ['Project Falcon'],
+});
+
+// 2. Apply the same rules, plus any areas a person marked by hand.
+await dr.api.redaction.apply(credential, {
+  tenantId,
+  nodeId,
+  patterns: ['email', 'ssn', 'employeeId'],
+  terms: ['Project Falcon'],
+  areas: [{ page: 2, x: 72, y: 540, width: 180, height: 14 }],
+  mode: 'copy',
+});
+```
+
+The plugin uses the core `better-files:documents:edit` action and adds no actions of its own, so it needs nothing new
+in Better IAM. It owns no tables.
+
+`pdf-lib`, `unpdf` and `@napi-rs/canvas` are optional peer dependencies, loaded only when a redaction runs. Without
+them, the endpoints answer `UNSUPPORTED` with `Redaction needs the <package> package`. `@napi-rs/canvas` is a native
+module: it runs on Node.js, not on edge runtimes.
+
+## Options
+
+<TypeTable
+  type={{
+    patterns: {
+      type: 'Record<string, RegExp>',
+      description: 'Your own detectors, by name, added to the built-in ones (a same-named one replaces a built-in). Host configuration only: request input never becomes a regular expression.',
+    },
+    scale: {
+      type: 'number',
+      description: 'Resolution of redacted PDF pages: 1 is 72 dpi, 2 is 144 dpi.',
+      default: '2',
+    },
+    maxBytes: {
+      type: 'number',
+      description: 'Largest file processed. Larger files are refused with PAYLOAD_TOO_LARGE.',
+      default: '104857600 (100 MiB)',
+    },
+  }}
+/>
+
+## Detectors
+
+A request names detectors in `patterns` and literal phrases in `terms`. Nothing is detected unless asked for.
+
+| Name | Finds |
+| --- | --- |
+| `email` | Email addresses |
+| `phone` | Phone numbers, with or without a country code |
+| `ssn` | US social security numbers written `123-45-6789` |
+| `iban` | International bank account numbers (IBAN) |
+| `card` | Runs of 13 to 19 digits, as on payment cards |
+| your `patterns` | Whatever your regular expressions match |
+| `terms` | Each phrase, matched literally and without regard to case |
+
+The built-in detectors are exported as `builtInPatterns`. They are simple regular expressions: they miss unusual
+formats and match some numbers that are not what they look for. That is why `find` exists: a person should review the
+matches before applying.
+
+## Endpoints
+
+The `redaction` group: `dr.api.redaction.<name>(credential, input)` on the server and `client.redaction.<name>(input)`
+on the [typed client](/docs/frameworks/client). Every input also takes `tenantId`.
+
+### find
+
+Lists matches in a PDF's text layer without changing anything.
+
+| Input | Description |
+| --- | --- |
+| `nodeId` | The document. |
+| `versionId?` | A version of it; the current version by default. It must be `ready`. |
+| `patterns?` | Up to 20 detector names. |
+| `terms?` | Up to 100 phrases, each 2 to 200 characters. |
+
+It returns `{ versionId, matches }`. Each match has `page`, `x`, `y`, `width`, `height`, the `rule` that matched
+(`term:<phrase>` for terms) and the matched `text`. Boxes are in PDF points with the origin at the bottom left of
+the page, padded a little to cover descenders. `find` works on PDFs only; on anything else it answers
+`UNSUPPORTED`.
+
+### apply
+
+Burns areas and matches out and stores the result.
+
+| Input | Description |
+| --- | --- |
+| `nodeId`, `versionId?` | The document and the version to redact, as for `find`. |
+| `areas?` | Up to 10,000 boxes `{ page, x, y, width, height }` marked by hand. |
+| `patterns?`, `terms?` | Detectors and phrases, as for `find`. Their matches are added to `areas`. PDFs only. |
+| `mode?` | `version` (default) adds a version to the document; `copy` creates a new document next to it. |
+| `comment?` | The new version's comment, up to 500 characters. Default `Redacted N areas`. |
+
+It returns `{ nodeId, versionId, mode, areas, pages }`: the document that holds the result, the new version, the
+number of areas burned in, and the pages they were on.
+
+- **PDFs.** Every page with at least one box is rendered as an image at `scale`, the boxes are filled in black, and
+  the image replaces the page. Other pages are copied unchanged and keep their text. Document metadata is not
+  carried over.
+- **Images.** Areas are in pixels, origin top left, all on page 1. The result is a PNG, and the file name gets a
+  `.png` extension.
+- **Copies** are named `<name> (redacted).<ext>` and placed in the same folder.
+
+## Permissions and version history
+
+Both endpoints need the `EDIT` [capability](/docs/reference/capabilities) on the document. `mode: 'copy'` also needs
+`UPLOAD` on the folder the copy goes into, or it answers `FORBIDDEN`. `apply` changes the room, so it is refused in
+closed and archived rooms.
+
+With `mode: 'version'`, the unredacted original stays in the document's history. People who may only read the
+document cannot reach it: the version list hides earlier versions from them, and asking for an earlier version by id
+answers `FORBIDDEN` (`Earlier versions need edit access to the document`). Editors still see the whole history.
+
+<Callout type="warn" title="Choose the mode for who can edit">
+  If people who must not see the original have edit access to the document, use `mode: 'copy'` and share the copy
+  instead, or remove the original from the room.
+</Callout>
+
+## Activity
+
+`apply` records `document.redacted` on the source document in the room's activity log. Its metadata is the `mode`,
+the number of `areas`, the `pages`, the detector names used (`term` for any phrase), `sourceVersionId` and
+`resultNodeId`. The redacted text and the phrases are never recorded.
+
+## Use it outside a room
+
+`findInPdf(bytes, rules)`, `redactPdf(bytes, areas, scale?)` and `redactImage(bytes, areas)` are exported, for
+redacting files that are not in a room:
+
+```ts
+import { builtInPatterns, findInPdf, redactPdf } from 'better-files/plugin-redaction';
+
+const matches = await findInPdf(pdfBytes, { ssn: builtInPatterns.ssn! });
+const redacted = await redactPdf(pdfBytes, matches);
+```
+
+## Errors
+
+| Code | When |
+| --- | --- |
+| `INVALID_INPUT` (400) | The node is a folder, nothing to redact (no areas and no matches), an unknown detector name, a box on a page the PDF does not have, or an image area not on page 1. |
+| `UNSUPPORTED` (501) | `find`, `patterns` or `terms` on something other than a PDF; `apply` on something other than a PDF or an image; or a peer dependency is missing. |
+| `PAYLOAD_TOO_LARGE` (413) | The file is larger than `maxBytes`. |
+| `CONFLICT` (409) | The version is not `ready` (still quarantined or processing, or rejected). |
+| `FORBIDDEN` (403) | No `EDIT` on the document, or no `UPLOAD` on the folder for a copy. |
+| `NOT_FOUND` (404) | The document or the version does not exist. |
+
+## Limits
+
+- Text search reads the PDF's text layer. A scanned PDF without one has nothing to find: mark areas by hand, or run
+  it through OCR first.
+- A match must sit within one text run of the PDF. Text a PDF splits across runs (some line breaks, some kerning) can
+  be missed, which is another reason to review `find` before applying.
+- Box positions for matches are estimated from the run's width, assuming equal-width characters.
+- Redacted PDF pages become images: their text can no longer be selected or searched, and they are larger.
+- The whole file is read into memory, up to `maxBytes`.
+
+## Related
+
+- [Watermarks](/docs/plugins/watermark)
+- [Document processing](/docs/plugins/processing)
+- [Capabilities](/docs/reference/capabilities)
+- [Error codes](/docs/reference/errors)

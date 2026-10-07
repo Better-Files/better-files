@@ -1,0 +1,181 @@
+---
+title: Better IAM integration
+description: Connect Better Files to Better IAM for sign-in, groups, policy decisions, per-room encryption keys and the tamper-evident audit log.
+metaTitle: Better IAM integration
+icon: ShieldCheck
+packages: ['@better-files/iam', 'better-iam']
+sources:
+  - packages/iam/src/index.ts
+  - packages/iam/src/hooks.ts
+  - tests/integration/better-iam.test.ts
+---
+
+Better Files does not have its own users, sessions or roles. It asks an identity system who is calling and whether
+they may do what they ask, and [Better IAM](https://better-iam.com) is the identity system it is built for. Better IAM
+signs people in, holds the organizations (tenants), groups and roles, evaluates policies, and keeps an audit chain
+that cannot be edited without detection. Better Files adds what a data room needs on top: rooms, folders, documents,
+the permission matrix, and everything the [plugins](/docs/plugins) do.
+
+The connection runs both ways:
+
+- **Better Files asks Better IAM** to authenticate each request, to decide each action, to encrypt files with keys
+  from its key management service (KMS), and to record security events in its audit chain.
+- **Better IAM asks Better Files** about folders and documents when a policy needs their attributes, through a
+  resolver you add to `betterIam()`.
+
+## Set up
+
+<Steps>
+<Step>
+
+### Install
+
+```npm
+npm install better-files better-iam
+```
+
+With pnpm 10 or later, allow Better IAM's password hashing to build: `pnpm approve-builds`, or
+`allowBuilds: { argon2: true }` in `pnpm-workspace.yaml`.
+
+</Step>
+<Step>
+
+### Create both instances
+
+Keep both instances in one module. `betterFilesIamPlugin()` adds the Better Files actions
+(`better-files:rooms:read`, `better-files:documents:view`, …) and resource types to Better IAM's permission catalog;
+pass it the same Better Files plugins you give `betterFiles()`, so their actions register too.
+`betterFilesResolver()` lets Better IAM describe folders and documents, and hands every other resource type to your
+own resolver. `betterIamIntegration()` connects Better Files to the Better IAM instance:
+
+```ts title="lib/auth.ts"
+import { betterIam } from 'better-iam';
+import { betterFiles } from 'better-files';
+import {
+  betterFilesIamPlugin,
+  betterFilesResolver,
+  betterIamIntegration,
+} from 'better-files/iam';
+import { postgresAdapter } from 'better-files/adapter-postgres';
+import { s3Storage } from 'better-files/storage-s3';
+import { ndaPlugin } from 'better-files/plugin-nda';
+
+const plugins = [ndaPlugin()] as const;
+const iamPlugin = betterFilesIamPlugin({ plugins });
+
+export const iam = betterIam({
+  database,
+  secret: process.env.BETTER_IAM_SECRET!,
+  baseURL: 'https://app.example.com',
+  plugins: [iamPlugin],
+  // Called only when Better IAM resolves a resource, after `dr` below exists.
+  resolveResource: betterFilesResolver(() => dr, { fallback: appResolver }),
+});
+
+export const dr = betterFiles({
+  iam: betterIamIntegration(iam, {
+    iamPlugin,
+    // A per-tenant service account allowed the actions in systemPolicy(iam).
+    systemCredential: (tenantId) => serviceKeys.get(tenantId),
+  }),
+  database: postgresAdapter({ pool }),
+  storage: s3Storage({ bucket: 'rooms', region: 'eu-west-1', credentials }),
+  secret: process.env.BETTER_FILES_SECRET!,
+  plugins,
+});
+```
+
+<Callout type="warn" title="One module, not two">
+  Splitting these into two files that import each other breaks: whichever loads second runs before the other's
+  exports exist. If you split them, have only one file import the other.
+</Callout>
+
+</Step>
+<Step>
+
+### Create the tables and the service account
+
+```ts
+await iam.initialize();
+await dr.initialize(); // run at deploy time
+```
+
+Then give each tenant a service account whose role uses [`systemPolicy(iam)`](/docs/guides/better-iam/service-account),
+and return its API key from `systemCredential`.
+
+</Step>
+</Steps>
+
+## What lives where
+
+Better IAM keeps the facts about **people and access**. Better Files keeps the **content** and the high-volume records
+about it, in its own tables, which can live in your app's database.
+
+| Better IAM | Better Files |
+| --- | --- |
+| Identities, sessions, MFA, tenants | Rooms, folders, documents, versions and the files |
+| Each room as a registered resource (`better-files-room/{id}`) | Room settings, status and schedules |
+| Room roles as relationship tuples (owner, admin, viewer, …) | The permission matrix: capabilities per group and person, per folder |
+| Permission groups as Better IAM groups | Member rosters, invitations and access windows |
+| The `Better Files participant` role and your own policies | Activity log (hash-chained), plugin data |
+| KMS keys (one per room) and the security audit chain | Encrypted file contents, wrapped data keys |
+
+Each operation passes [both layers](/docs/guides/better-iam/access-model): the permission matrix in Better Files, and a
+Better IAM decision on the action. Either can refuse it.
+
+## Options
+
+`betterIamIntegration(iam, options)` takes:
+
+<TypeTable
+  type={{
+    iamPlugin: {
+      type: 'IamPlugin',
+      description: 'The betterFilesIamPlugin() registered on Better IAM. With it, betterFiles() refuses to start if a plugin action is not registered, and cached role, group and key ids follow Better IAM\'s audit events.',
+    },
+    systemCredential: {
+      type: '(tenantId: string) => Credential (or a promise of one)',
+      description: 'The credential for identity-system writes (registering rooms, room roles, groups, invitations, KMS calls), used after Better Files has authorized the caller. Without it, writes use the caller\'s own credential (which then needs those permissions), and Better IAM\'s KMS is not offered for files: betterFiles() then needs encryption: { keys } of its own, or refuses to start.',
+    },
+    accessModel: {
+      type: "'auto' | 'manual'",
+      description: 'auto finds or creates the Better Files participant role per tenant and binds it to everyone given a room role; manual leaves roles and bindings to you.',
+      default: "'auto'",
+    },
+    keys: {
+      type: '{ perRoom?: boolean } | false',
+      description: 'Encrypt files with Better IAM\'s KMS: a key per room, one key per tenant (perRoom: false), or false for none.',
+      default: '{ perRoom: true }',
+    },
+    audit: {
+      type: 'boolean',
+      description: 'Record security events (permission changes, original downloads, exports) in Better IAM\'s audit chain.',
+      default: 'true',
+    },
+    externalInvites: {
+      type: "'guests' | 'members'",
+      description: 'How people from outside the organization are invited. Defaults to guests when the Better IAM release has them; see Outsiders.',
+    },
+  }}
+/>
+
+<Cards>
+  <Card title="Access model" href="/docs/guides/better-iam/access-model" icon="Scale">
+    Room relations, the participant role, and how decisions reach folders and documents.
+  </Card>
+  <Card title="Service account" href="/docs/guides/better-iam/service-account" icon="KeyRound">
+    The system credential and the permissions it needs.
+  </Card>
+  <Card title="Outsiders" href="/docs/guides/better-iam/outsiders" icon="UserPlus">
+    Guests, member invitations, and keeping outside people contained.
+  </Card>
+  <Card title="Keys and audit" href="/docs/guides/better-iam/keys-and-audit" icon="LockKeyhole">
+    A KMS key per room, crypto-shredding, and the security audit chain.
+  </Card>
+  <Card title="Managed records" href="/docs/guides/better-iam/managed-records" icon="ShieldHalf">
+    The guard that keeps Better IAM and Better Files from drifting apart.
+  </Card>
+  <Card title="Release compatibility" href="/docs/guides/better-iam/compatibility" icon="Layers">
+    What each Better IAM release offers, and testing against unreleased changes.
+  </Card>
+</Cards>

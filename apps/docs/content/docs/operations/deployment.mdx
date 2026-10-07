@@ -1,0 +1,215 @@
+---
+title: Deployment
+description: Run Better Files on long-running servers or serverless hosts - the fetch and Node handlers, CSRF and trusted origins, body limits, proxies and scheduling.
+metaTitle: Deploying Better Files
+icon: Rocket
+packages: ['@better-files/server', '@better-files/client']
+sources:
+  - packages/server/src/http.ts
+  - packages/server/src/options.ts
+  - packages/server/src/index.ts
+  - packages/server/src/engine.ts
+  - packages/server/src/files.ts
+  - packages/server/src/stream.ts
+  - packages/server/src/jobs.ts
+  - packages/server/src/endpoints/nodes.ts
+  - packages/client/src/index.ts
+  - packages/middleware/src/express.ts
+  - packages/middleware/src/hono.ts
+  - packages/middleware/src/koa.ts
+  - packages/better-files/package.json
+  - README.md
+  - PLAN.md
+---
+
+Better Files has no server of its own to deploy. It runs inside your app's process, on your database and your object
+storage, and answers its HTTP protocol under one path of your app (`/api/better-files` by default). Deploying it means
+deploying your app with a few things set right: one stable secret, the tables created, a schedule for maintenance,
+and the protocol mounted where browsers can reach it safely.
+
+```ts title="better-files.ts"
+import { betterFiles } from 'better-files';
+
+export const dr = betterFiles({
+  iam,
+  database,
+  storage,
+  secret: process.env.BETTER_FILES_SECRET!, // at least 32 characters, the same on every instance
+  encryption: { keys },
+  plugins,
+  trustedOrigins: ['https://app.example.com'],
+});
+```
+
+Then, at deploy time and at runtime:
+
+<Steps>
+<Step>
+Create or upgrade the tables: `npx better-files migrate`, or `await dr.initialize()` in a deploy script.
+</Step>
+<Step>
+Mount the protocol at `basePath` with a [framework integration](/docs/frameworks) or one of the handlers below.
+</Step>
+<Step>
+Schedule [`dr.maintain()`](/docs/operations/maintenance-and-jobs) every few minutes from one place.
+</Step>
+<Step>
+With a queue runner, call `dr.jobs.start()` in the processes that should work jobs. On shutdown, `await dr.close()`.
+</Step>
+</Steps>
+
+The `better-files` package needs Node 22.12 or later.
+
+## The two handlers
+
+`dr.handler(request, { ip })` is a fetch handler: it takes a web `Request` and returns a `Response`. Next.js, Hono,
+SvelteKit, React Router, Bun and Deno all hand you a `Request`, and the
+[framework integrations](/docs/frameworks) are built on it. See [fetch runtimes](/docs/frameworks/fetch).
+
+`dr.nodeHandler(req, res)` serves the same protocol on Node's `http` module. It reads JSON bodies up to the size
+limit, streams uploads and downloads, and passes the socket's address as the client address.
+
+```ts
+import { createServer } from 'node:http';
+import { dr } from './better-files';
+
+await dr.initialize();
+createServer((req, res) => void dr.nodeHandler(req, res)).listen(3000);
+```
+
+Both answer only paths under `basePath`; anything else is a JSON 404. The protocol has these routes:
+
+| Route | What it is |
+| --- | --- |
+| `POST {basePath}/{group}/{method}` | Every operation, with a JSON body: `rooms/create`, `documents/requestView`, plugin endpoints. |
+| `PUT {basePath}/uploads/{uploadId}/content` | A whole file, for single uploads. |
+| `PUT {basePath}/uploads/{uploadId}/parts/{n}` | One part of a multipart upload. |
+| `GET` or `HEAD {basePath}/files/{token}` | Serves a download or viewer ticket. Byte ranges work for originals. |
+| `GET {basePath}/rooms/{roomId}/events` | A room's activity as Server-Sent Events. |
+| `GET {basePath}/health` | `{ data: { ok: true } }`, with no checks behind it, for load balancer probes. |
+| `OPTIONS` | CORS preflight answers. |
+
+JSON responses carry `cache-control: no-store`, `x-content-type-options: nosniff` and `referrer-policy: no-referrer`.
+A valid `x-request-id` header (up to 128 letters, digits, dots, underscores or hyphens) is echoed back and included in
+error bodies, so you can match a failed call to your logs.
+
+## CSRF protection and trusted origins
+
+Two checks stop other sites from calling the protocol with your users' cookies:
+
+1. **The `x-better-files: 1` header.** Operations and upload `PUT`s without it are refused with `FORBIDDEN`. A plain
+   HTML form cannot set a custom header, and a cross-site script cannot send one without a CORS preflight. The
+   [client](/docs/frameworks/client) sends it for you.
+2. **The origin.** A request that carries a `Cookie` header must carry an `Origin` that is either the request's own
+   origin or listed in `trustedOrigins`. Requests that authenticate with a bearer token and no cookie skip this check.
+
+```ts
+betterFiles({
+  // …
+  trustedOrigins: ['https://app.example.com', 'https://admin.example.com'],
+});
+```
+
+Origins are compared exactly: scheme, host and port. Preflight `OPTIONS` requests from the request's own origin or a
+trusted one are answered with `access-control-allow-credentials: true` and the methods and headers the protocol uses.
+The responses themselves carry no CORS headers, so if a browser app on another origin reads them, add those headers
+in your framework or proxy.
+
+Two routes work without the header, because browsers cannot add one there: ticket URLs under `/files/` (the signed
+token is the credential) and the activity stream (`EventSource` cannot send headers; a request with a foreign
+`Origin` that is not trusted is still refused).
+
+## Body limits
+
+| Limit | Default | Set with |
+| --- | --- | --- |
+| JSON request body | 64 KiB | `maxJsonBodyBytes` |
+| One file | 5 GiB | `limits.maxFileSize` |
+| Upload part | 8 MiB | `limits.partSize` (a multiple of the 64 KiB encryption segment) |
+| Open upload session | 24 hours | `limits.uploadTtlMs` |
+| Files in one folder download | 5,000 | `limits.maxBundleFiles` |
+
+A JSON body over the limit is answered with 413 `PAYLOAD_TOO_LARGE`. Operations must be sent as
+`application/json` (415 otherwise) and with `POST` (405 otherwise). When the storage adapter supports multipart
+uploads, files larger than one part are uploaded in parts of `partSize`, so no single request is much larger than
+one part. If a proxy in front of your app limits request sizes, allow at least that much on `PUT`s under `basePath`.
+
+## Behind a proxy
+
+Better Files records the client address in the activity log and on download tickets, stamps it in watermarks, and
+plugins such as [network rules](/docs/plugins/network) decide with it. Where it comes from:
+
+1. An `ip` you pass to `dr.handler(request, { ip })` always wins.
+2. Otherwise, with `trustProxy: true`, the first address in `X-Forwarded-For`.
+3. Otherwise there is no client address.
+
+`dr.nodeHandler`, the Express and Koa middleware, and the Hono handler on `@hono/node-server` pass the socket's
+address (Koa passes `ctx.ip`). Behind a reverse proxy, that is the proxy's address, and `trustProxy` does not change
+it, because the passed address wins. On those stacks, call `dr.handler` with the address your proxy reports, or use
+Koa with its `proxy` setting. Only trust `X-Forwarded-For` when your own proxy sets it and clients cannot reach the app
+around it.
+
+The activity stream sends `x-accel-buffering: no`, so nginx passes events on without buffering. Other proxies may
+need response buffering turned off for `text/event-stream`.
+
+## Long-running servers and serverless hosts
+
+| Concern | Long-running server | Serverless |
+| --- | --- | --- |
+| Large uploads | Parts stream through your server. | Request-size limits apply: use direct uploads. |
+| Downloads | Streamed from `/files/{token}`. | The same route; mind response-time limits on very large files. |
+| Jobs | The `inline` runner (default) runs them in the process. | Use `runner: 'deferred'` and call `dr.jobs.work()` from a scheduled function, or a queue runner. |
+| Maintenance | A `setInterval` in one process, or `better-files maintain --every 300`. | A scheduled function or cron route that calls `dr.maintain()`. |
+| Live activity | Each stream waits on in-process events, and checks the database every 15 seconds. | The same; a stream ends when the platform's response limit cuts it, and the browser reconnects. |
+
+### Direct uploads
+
+Serverless platforms cap request bodies, sometimes below one 8 MiB part. With `direct: true`, the browser encrypts each
+part itself and uploads it straight to object storage through presigned URLs:
+
+```ts
+await client.upload({ parentId: folderId, file, direct: true });
+```
+
+This needs a storage adapter that presigns parts (the [S3-compatible adapter](/docs/operations/storage/s3)), and bucket
+CORS rules that allow `PUT` and expose the `ETag` header. Your server never sees the bytes, but it still checks every
+encrypted segment before it accepts the file; an adapter without presigned parts answers `UNSUPPORTED`. See
+[uploads and downloads](/docs/guides/concepts/uploads-and-downloads).
+
+### Tickets on any instance
+
+A download or view is a two-step flow: an operation such as `documents.requestDownload` checks access and issues a
+ticket, and the browser fetches `GET {basePath}/files/{token}`. The token is signed with `secret` and names a ticket row
+in the database, so any instance with the same secret and database can serve it, whichever instance issued it.
+Tickets are valid for 60 seconds (`limits.ticketTtlMs`) and serve at most 5 requests (`limits.ticketUses`), enough for
+range requests and a resumed download.
+
+Every instance must therefore use the same `secret`, and it must not change between deploys: changing it invalidates
+tickets in flight.
+
+### Jobs on short-lived processes
+
+The default `inline` runner starts jobs right after the request's transaction commits, inside the same process. On a
+host that freezes or ends the process after the response, those jobs may stop halfway. Nothing is lost, because jobs
+live in the `jobs` table and `dr.maintain()` runs whatever is left, but they run late. On such hosts, choose
+`jobs: { runner: 'deferred' }` and call `dr.jobs.work()` on a schedule, or hand jobs to a queue. See
+[maintenance and jobs](/docs/operations/maintenance-and-jobs#choose-a-runner).
+
+## Checklist
+
+- `secret`: at least 32 characters, from your secret store, identical on every instance, stable across deploys.
+- `encryption`: a key provider. `encryption: false` stores files unencrypted and is meant for development only. See
+  [encryption](/docs/operations/encryption).
+- Tables: `better-files migrate` on each deploy that adds plugins or upgrades Better Files.
+- `trustedOrigins`: every other origin your browser app is served from.
+- `trustProxy` or an explicit `ip`, when behind a proxy.
+- One scheduler for `dr.maintain()`.
+- `npx better-files doctor --tenant <id>` against production settings: secret, database, storage round trip and a data
+  key round trip. See [the CLI](/docs/operations/cli#doctor).
+
+## Related
+
+- [Fetch runtimes](/docs/frameworks/fetch)
+- [Maintenance and jobs](/docs/operations/maintenance-and-jobs)
+- [Security](/docs/operations/security)
+- [Storage](/docs/operations/storage)
